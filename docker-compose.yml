@@ -1,0 +1,17 @@
+# Settings come from .env (MAHINA_PORT, MAHINA_BIND, and everything in .env.example).
+services:
+  mahina:
+    build: .
+    image: mahina-club:local
+    container_name: mahina-club
+    restart: unless-stopped
+    ports:
+      - "${MAHINA_BIND:-0.0.0.0}:${MAHINA_PORT:-8080}:8080"
+    env_file: .env
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

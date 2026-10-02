@@ -1,0 +1,932 @@
+// Admin console.
+import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
+  clubNow, isoLocal, toast, modal, confirmBox, field, input, onSubmit, formErrors, values, tagChip, empty, plural, copy,
+  setTitle, media, loading, CFG, query, replaceUrl, anchor } from "./core.js";
+import { moonInfo, moonSVG } from "./moon.js";
+import { results } from "./pages.js";
+
+let ME = null;
+let STATE = {};
+let COUNTS = {};
+const TAG_COLORS = ["reef", "plumeria", "fern", "lagoon", "lehua", "taro"];
+const REMINDERS = [[168, "1 week before"], [48, "2 days before"], [24, "1 day before"], [3, "3 hours before"]];
+const Q_KINDS = [["single", "Multiple choice"], ["multi", "Checkboxes"], ["rating", "Rating 1–5"], ["text", "Written answer"]];
+const ACCENTS = [["", "Theme color"], ["#C8233B", "Lehua"], ["#C2185B", "Hibiscus"], ["#0E7C7B", "Reef"], ["#2F6DB5", "Lagoon"], ["#6F558F", "Taro"], ["#C98A0E", "Plumeria"], ["#0F2340", "Night"]];
+
+// ---------- small components ----------
+const sw = (name, label, checked, attrs = {}) => h("label.switch", h("span", label, attrs.hintText ? hint(attrs.hintText) : null), h("input", { type: "checkbox", name, checked: !!checked, role: "switch", onchange: attrs.onchange }));
+const sel = (name, options, value, attrs = {}) => h("select", { name, ...attrs }, options.map(([v, t]) => h("option", { value: v, selected: String(v) === String(value ?? "") }, t)));
+const pill = (s, label) => h("span.pill", { class: s }, label || s[0].toUpperCase() + s.slice(1));
+const dateCell = (s) => { const d = parse(s); return `${monthName(d, "short")} ${d.getDate()}${d.getFullYear() !== clubNow().getFullYear() ? ", " + d.getFullYear() : ""}`; };
+const ago = (s) => {
+  const d = parse(s), n = (clubNow() - d) / 60000;
+  if (n < 1) return "just now";
+  if (n < 60) return `${Math.round(n)} min ago`;
+  if (n < 1440) return `${Math.round(n / 60)} hr ago`;
+  if (n < 10080) return `${Math.round(n / 1440)} d ago`;
+  return dateCell(s);
+};
+const aHref = (p) => href("/admin" + p);
+const aLink = (p, attrs, ...kids) => link("/admin" + p, attrs, ...kids);
+const csv = (path) => (CFG.demo ? () => toast("Exports work on the live site") : () => { location.href = path; });
+async function refreshSite() { try { window.SITE = await api("/api/site"); } catch {} }
+
+// ---------- entry ----------
+export async function render(path) {
+  const app = $("#app");
+  const parts = path.replace(/^\/admin\/?/, "").split("/").filter(Boolean);
+  const [section = "", id] = parts;
+  let state;
+  try { state = await api("/api/admin/state"); } catch (e) { clear(app).append(h("div.auth", h("div.auth-card", h("p", e.message)))); return; }
+  STATE = state;
+  if (!state.setup) return authScreen(app, "setup");
+  if (!state.admin) return authScreen(app, "login");
+  ME = state.admin;
+  STATE = state;
+  const main = h("main.admin-main", loading());
+  clear(app).append(layout(section, main));
+  window.scrollTo(0, 0);
+  const pages = { "": overview, events: id ? eventEditor : eventsList, signups: id ? sheetEditorPage : sheetsList, polls: id ? pollEditor : pollsList,
+    gallery: galleryAdmin, messages: inbox, people, email: emailPage, settings };
+  try {
+    const node = await (pages[section] || overview)(id, main);
+    clear(main).append(node);
+  } catch (e) {
+    clear(main).append(h("div.empty", h("p.empty-title", e.message), aLink("", { class: "btn dark" }, "Back to overview")));
+  }
+  refreshCounts();
+}
+
+async function refreshCounts() {
+  try {
+    const o = await api("/api/admin/overview");
+    COUNTS = { messages: o.unread, gallery: o.pending_photos, email: o.outbox_held };
+    $$(".side nav a").forEach((a) => {
+      const n = COUNTS[a.dataset.sec];
+      $(".count", a)?.remove();
+      if (n) a.append(h("span.count", n));
+    });
+  } catch {}
+}
+
+function layout(section, main) {
+  const nav = [["", "Overview", "home"], ["events", "Events", "calendar"], ["signups", "Sign-ups", "list"], ["polls", "Polls", "poll"],
+    ["gallery", "Gallery", "image"], ["messages", "Messages", "inbox"], ["people", "People", "people"], ["email", "Email", "mail"], ["settings", "Settings", "gear"]];
+  const m = moonInfo();
+  const mark = () => link("/admin", { class: "wordmark" }, moonSVG(m.phase, 22, { maria: false }), window.SITE?.club_name || "Mahina Club");
+  const side = h("aside.side",
+    h("div.row", { style: { justifyContent: "space-between" } }, mark(), h("button.icon-btn.menu-close", { type: "button", "aria-label": "Close menu", style: { display: "none" }, onclick: () => side.classList.remove("open") }, icon("close"))),
+    h("nav", { "aria-label": "Admin" }, nav.map(([s, t, i]) => aLink(s ? "/" + s : "", { "data-sec": s, "aria-current": s === section ? "page" : null, onclick: () => side.classList.remove("open") },
+      icon(i), t, COUNTS[s] ? h("span.count", COUNTS[s]) : null))),
+    h("div.side-foot",
+      CFG.demo ? h("div.callout", { style: { margin: "0 0 8px", fontSize: "13px" } }, "Preview only. Edits here aren't saved.") : null,
+      h("div.side-who", h("b", ME.name), ME.email),
+      link("/", {}, icon("external"), "View site"),
+      h("button", { type: "button", onclick: async () => { await api("/api/admin/logout", { method: "POST" }); go("/admin"); } }, icon("logout"), "Sign out")));
+  const top = h("div.admin-top", mark(), h("button.icon-btn", { type: "button", "aria-label": "Menu", onclick: () => { side.classList.add("open"); $(".menu-close", side).style.display = "inline-grid"; } }, icon("menu", 24)));
+  return h("div.admin", side, h("div", top, main));
+}
+
+// Password field with a show/hide toggle. Paste and password managers work; nothing is restricted but length.
+function pwField(label, name, { autocomplete = "current-password", isNew = false, hintText } = {}) {
+  const inp = input(name, { type: "password", required: true, autocomplete, maxlength: 128, minlength: isNew ? STATE.min_password || 15 : null,
+    spellcheck: "false", autocapitalize: "off" });
+  const toggle = h("button.pw-toggle", { type: "button", "aria-label": "Show password", "aria-pressed": "false", onclick: () => {
+    const show = inp.type === "password";
+    inp.type = show ? "text" : "password";
+    toggle.setAttribute("aria-pressed", String(show));
+    toggle.setAttribute("aria-label", show ? "Hide password" : "Show password");
+    clear(toggle).append(icon(show ? "eyeOff" : "eye", 18));
+  } }, icon("eye", 18));
+  const f = field(label, inp, { hintText: hintText ?? (isNew ? `At least ${STATE.min_password || 15} characters, any kind. A few words strung together works well.` : null) });
+  const wrap = h("span.pw-wrap");
+  inp.replaceWith(wrap);
+  wrap.append(inp, toggle);
+  return f;
+}
+
+const SSO_ERRORS = { notadmin: "That account isn't an admin here. Ask an admin to add your email.",
+  noemail: "Your sign-in provider didn't share a verified email.", failed: "Single sign-on didn't finish. Try again." };
+
+function authScreen(app, mode) {
+  setTitle(mode === "setup" ? "Set up" : "Sign in");
+  const m = moonInfo();
+  const pwOn = mode === "setup" || STATE.password_login !== false;
+  const err = query().get("sso_error");
+  const form = pwOn ? h("form",
+    mode === "setup" ? field("Your name", input("name", { required: true, autocomplete: "name" })) : null,
+    field("Email", input("email", { type: "email", required: true, autocomplete: "username" })),
+    pwField("Password", "password", mode === "setup" ? { autocomplete: "new-password", isNew: true } : {}),
+    h("p.form-error"),
+    h("button.btn.block", { type: "submit" }, mode === "setup" ? "Create admin account" : "Sign in")) : null;
+  if (form) onSubmit(form, async (v) => {
+    await api(`/api/admin/${mode === "setup" ? "setup" : "login"}`, { method: "POST", body: v });
+    render("/admin");
+  });
+  const sso = mode === "login" && STATE.sso ? h("a.btn.block", { class: pwOn ? "ghost" : "", href: "/api/admin/sso/start" }, `Sign in with ${STATE.sso.name}`) : null;
+  clear(app).append(h("div.auth", h("div.auth-card",
+    link("/", { class: "wordmark" }, moonSVG(m.phase, 22, { maria: false }), window.SITE?.club_name || "Mahina Club"),
+    h("h1", mode === "setup" ? "Create the first admin" : "Admin sign in"),
+    err && SSO_ERRORS[err] ? h("p.form-error", { style: { marginBottom: "14px" } }, SSO_ERRORS[err]) : null,
+    sso, sso && form ? h("div.auth-or", "or") : null, form)));
+  form?.querySelector("input").focus();
+}
+
+function head(title, { back, actions, sub } = {}) {
+  setTitle(`Admin: ${title}`);
+  return h("div.a-head", h("div", back ? aLink(back[0], { class: "back" }, icon("left", 18), back[1]) : null, h("h1", title), sub ? h("div.a-sub", sub) : null),
+    actions ? h("div.row", actions) : null);
+}
+
+// ---------- overview ----------
+async function overview() {
+  const [o, s] = await Promise.all([api("/api/admin/overview"), api("/api/admin/settings")]);
+  const todos = [];
+  if (!o.smtp_ready) todos.push(["mail", "Connect an email service so confirmations and reminders go out", "/settings#email"]);
+  if (!s.venmo) todos.push(["heart", "Add the club Venmo handle to turn on the Give page", "/settings#give"]);
+  if (o.outbox_held) todos.push(["send", `${plural(o.outbox_held, "email")} waiting to send`, "/email"]);
+  const verb = { rsvp: "is going to", signup: "signed up for", poll: "answered" };
+  return h("div",
+    head(`Aloha, ${ME.name.split(" ")[0]}`, { actions: [aLink("/events/new", { class: "btn" }, icon("plus", 18), "New event"), aLink("/email", { class: "btn ghost" }, "Email people")] }),
+    todos.length ? h("div.todo", todos.map(([i, t, p]) => aLink(p, {}, icon(i), t, h("span.go", "Set up")))) : null,
+    h("div.stats",
+      aLink("/events", { class: "stat" }, h("b", o.upcoming.length), h("span", "Upcoming events")),
+      aLink("/messages", { class: "stat" }, h("b", o.unread), h("span", "Unread messages")),
+      aLink("/gallery?show=pending", { class: "stat" }, h("b", o.pending_photos), h("span", "Photos to review")),
+      aLink("/people", { class: "stat" }, h("b", o.subscribers), h("span", "On the mailing list"))),
+    h("div.two-col",
+      h("section.a-section", h("h2", "Coming up", aLink("/events", { class: "text-link small" }, "All events")),
+        o.upcoming.length ? eventTable(o.upcoming) : empty("Nothing scheduled.", aLink("/events/new", { class: "btn dark" }, "New event"))),
+      h("section.a-section", h("h2", "Recent activity"),
+        o.recent.length ? h("div.activity", o.recent.map((r) => h("div", h("span", h("b", r.name), ` ${verb[r.kind]} `, r.what), h("time", ago(r.created))))) : h("p.muted", "No activity yet."))));
+}
+
+function eventTable(list) {
+  return h("div.tbl-wrap", h("table.tbl",
+    h("thead", h("tr", h("th", "Date"), h("th", "Event"), h("th", "Status"), h("th.num", "Going"), h("th.num", "Sign-ups"))),
+    h("tbody", list.map((e) => h("tr.click", { onclick: () => go(`/admin/events/${e.id}`) },
+      h("td.date", dateCell(e.starts_at)),
+      h("td", h("a.strong", { href: aHref(`/events/${e.id}`), style: { textDecoration: "none" } }, e.title), h("div.sub", `${weekday(parse(e.starts_at))} ${e.all_day ? "" : time(parse(e.starts_at))}`)),
+      h("td", pill(e.status)),
+      h("td.num", e.going || "–"),
+      h("td.num", e.signup ? `${e.signup.open} open` : "–"))))));
+}
+
+// ---------- events ----------
+async function eventsList() {
+  const all = await api("/api/admin/events");
+  const now = isoLocal(clubNow());
+  const f = { view: query().get("view") || "upcoming" };
+  const body = h("div");
+  const draw = () => {
+    const list = all.filter((e) => f.view === "drafts" ? e.status === "draft" : f.view === "past" ? e.starts_at < now && e.status !== "draft" : e.starts_at >= now && e.status !== "draft");
+    if (f.view === "upcoming" || f.view === "drafts") list.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+    clear(body).append(
+      h("div.seg", { style: { marginBottom: "20px" } }, [["upcoming", "Upcoming"], ["past", "Past"], ["drafts", "Drafts"]].map(([v, t]) =>
+        h("button", { type: "button", "aria-pressed": String(f.view === v), onclick: () => { f.view = v; draw(); } }, t))),
+      list.length ? eventTable(list) : empty(f.view === "drafts" ? "No drafts." : "No events here."));
+  };
+  draw();
+  return h("div", head("Events", { actions: [aLink("/events/new", { class: "btn" }, icon("plus", 18), "New event")] }), body);
+}
+
+async function eventEditor(id) {
+  const isNew = id === "new";
+  const [ev, tags] = await Promise.all([isNew ? null : api(`/api/admin/events/${id}`), api("/api/admin/tags")]);
+  const tab = query().get("tab") || "details";
+  if (isNew) return h("div", head("New event", { back: ["/events", "Events"] }), eventForm(null, tags));
+  const tabs = [["details", "Details"], ["signups", "Sign-ups", ev.sheets.length], ["rsvps", "RSVPs", ev.rsvps.filter((r) => r.status === "going").length], ["invite", "Invite"]];
+  const body = h("div");
+  const setTab = (t) => {
+    replaceUrl(`/admin/events/${id}?tab=${t}`);
+    $$(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.t === t)));
+    clear(body).append(t === "signups" ? eventSheets(ev) : t === "rsvps" ? rsvpTab(ev) : t === "invite" ? inviteTab(ev) : eventForm(ev, tags));
+  };
+  const page = h("div",
+    head(ev.title, { back: ["/events", "Events"], sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`,
+      actions: [
+        link(`/events/${ev.slug}`, { class: "btn small ghost", target: "_blank" }, icon("external", 16), "View"),
+        h("button.btn.small.ghost", { type: "button", onclick: async () => { const r = await api(`/api/admin/events/${id}/duplicate`, { method: "POST" }); toast("Duplicated as a draft"); go(`/admin/events/${r.id}`); } }, icon("copy", 16), "Duplicate"),
+        h("button.btn.small.ghost", { type: "button", onclick: async () => {
+          if (await confirmBox(`Delete ${ev.title}? RSVPs and sign-ups for it go too.`)) { await api(`/api/admin/events/${id}`, { method: "DELETE" }); toast("Event deleted"); go("/admin/events"); }
+        } }, icon("trash", 16), "Delete")] }),
+    h("div.tabs", { role: "tablist" }, tabs.map(([t, label, n]) => h("button", { type: "button", role: "tab", "data-t": t, "aria-selected": String(t === tab), onclick: () => setTab(t) }, label, n != null ? h("span.n", n) : null))),
+    body);
+  setTab(tab);
+  return page;
+}
+
+function eventForm(ev, allTags) {
+  const e = ev || { title: "", starts_at: "", ends_at: "", location: "", map_url: "", summary: "", description: "", status: "published",
+    rsvp_enabled: true, capacity: null, reminders: [24], tag_ids: [], cover: null, cover_photo_id: null, all_day: false };
+  const st = { tags: new Set(e.tag_ids), cover: e.cover, cover_id: e.cover_photo_id, status: e.status, reminders: new Set(e.reminders) };
+  const tagBox = h("div.chips-edit");
+  const drawTags = () => clear(tagBox).append(allTags.map((t) => tagChip(t, { active: st.tags.has(t.id), onclick: () => { st.tags.has(t.id) ? st.tags.delete(t.id) : st.tags.add(t.id); drawTags(); } })),
+    h("form.add-tag", { onsubmit: async (x) => {
+      x.preventDefault();
+      const name = x.target.tagname.value.trim(); if (!name) return;
+      const t = await api("/api/admin/tags", { method: "POST", body: { name, color: TAG_COLORS[allTags.length % TAG_COLORS.length] } });
+      allTags.push(t); st.tags.add(t.id); drawTags(); refreshSite();
+    } }, h("input", { name: "tagname", placeholder: "New tag", "aria-label": "New tag" }), h("button.icon-btn", { type: "submit", "aria-label": "Add tag" }, icon("plus", 18))));
+  drawTags();
+  const coverBox = h("div");
+  const drawCover = () => clear(coverBox).append(
+    h("div.cover-pick", st.cover ? h("img", { src: media(st.cover.thumb), alt: "" }) : icon("image", 28)),
+    h("div.row", { style: { marginTop: "10px" } },
+      h("label.btn.small.ghost", { style: { cursor: "pointer" } }, st.cover ? "Replace" : "Upload",
+        h("input", { type: "file", accept: "image/*", hidden: true, onchange: async (x) => {
+          const fd = new FormData(); fd.append("file", x.target.files[0]);
+          const p = await api("/api/admin/settings/cover", { method: "POST", form: fd });
+          st.cover = p; st.cover_id = p.id; drawCover();
+        } })),
+      h("button.btn.small.ghost", { type: "button", onclick: () => pickPhoto((p) => { st.cover = p; st.cover_id = p.id; drawCover(); }) }, "From gallery"),
+      st.cover ? h("button.btn.small.ghost", { type: "button", onclick: () => { st.cover = null; st.cover_id = null; drawCover(); } }, "Remove") : null));
+  drawCover();
+  const statusSeg = h("div.seg");
+  const drawStatus = () => clear(statusSeg).append([["draft", "Draft"], ["published", "Published"], ["cancelled", "Cancelled"]].map(([v, t]) =>
+    h("button", { type: "button", "aria-pressed": String(st.status === v), onclick: () => { st.status = v; drawStatus(); } }, t)));
+  drawStatus();
+  const [sd, stime] = (e.starts_at || "").split("T");
+  const [ed, etime] = (e.ends_at || "").split("T");
+  const form = h("form",
+    field("Title", input("title", { value: e.title, required: true, placeholder: "ʻOhana Potluck" })),
+    h("div.two", field("Date", input("date", { type: "date", value: sd || "", required: true })),
+      h("div.two", field("Starts", input("start", { type: "time", value: stime || "", step: 300 })), field("Ends", input("end", { type: "time", value: etime || "", step: 300 }), { optional: true }))),
+    h("label.check", h("input", { type: "checkbox", name: "all_day", checked: !!e.all_day }), "All day"),
+    h("div.two", field("Place", input("location", { value: e.location, placeholder: "Hickam Beach, Pavilion 3" })),
+      field("Map link", input("map_url", { type: "url", value: e.map_url, placeholder: "https://maps.google.com/..." }), { optional: true, hintText: "Leave blank and the site links to a map search for the place." })),
+    field("Summary", input("summary", { value: e.summary, maxlength: 240 }), { hintText: "One line. Shows on the timeline and in emails." }),
+    field("Details", h("textarea", { name: "description", rows: 7 }, e.description || "")),
+    ev && ev.status === "published" ? h("label.check", h("input", { type: "checkbox", name: "notify_change" }), "Email attendees if the date, place, or status changes") : null,
+    h("p.form-error"),
+    null);
+  form.id = "event-form";
+  onSubmit(form, async (v) => {
+    if (!v.date) throw Object.assign(new Error("Pick a date."), { field: "date" });
+    const starts_at = `${v.date}T${v.all_day ? "00:00" : v.start || "00:00"}`;
+    const ends_at = v.end && !v.all_day ? `${v.date}T${v.end}` : (v.all_day ? `${v.date}T23:59` : "");
+    const body = { ...v, starts_at, ends_at, status: st.status, tag_ids: [...st.tags], cover_photo_id: st.cover_id, reminders: [...st.reminders],
+      rsvp_enabled: $("[name=rsvp_enabled]", panel).checked, capacity: $("[name=capacity]", panel).value };
+    if (ev) {
+      await api(`/api/admin/events/${ev.id}`, { method: "PUT", body });
+      toast("Saved");
+      Object.assign(ev, body);
+    } else {
+      const r = await api("/api/admin/events", { method: "POST", body });
+      toast(st.status === "draft" ? "Draft saved" : "Event created");
+      go(`/admin/events/${r.id}?tab=signups`);
+    }
+  });
+  const panel = h("div.panel",
+    h("div.panel-block", h("span.field-label", "Status"), statusSeg),
+    h("div.panel-block", h("span.field-label", "Cover photo"), coverBox),
+    h("div.panel-block", h("span.field-label", "Tags", hint("Tags color the timeline and link events to gallery photos.")), tagBox),
+    h("div.panel-block", h("span.field-label", "RSVPs"),
+      sw("rsvp_enabled", "Take RSVPs", e.rsvp_enabled),
+      field("Capacity", input("capacity", { type: "number", min: 1, value: e.capacity || "", placeholder: "No limit" }), { optional: true })),
+    h("div.panel-block", h("span.field-label", "Reminder emails", hint("Sent to everyone who RSVPs or signs up.")),
+      REMINDERS.map(([hrs, t]) => h("label.check", h("input", { type: "checkbox", checked: st.reminders.has(hrs), onchange: (x) => x.target.checked ? st.reminders.add(hrs) : st.reminders.delete(hrs) }), t))));
+  return h("div.editor", form, panel, h("div.savebar", h("button.btn", { type: "submit", form: "event-form" }, ev ? "Save changes" : "Create event")));
+}
+
+function pickPhoto(onPick) {
+  const grid = h("div.pgrid", loading());
+  const m = modal(h("div", h("h2", "Choose a photo"), grid), { wide: true, label: "Choose a photo" });
+  api("/api/admin/photos").then((list) => {
+    clear(grid).append(list.filter((p) => p.status !== "pending").map((p) => h("button.pthumb", { type: "button", onclick: () => { onPick(p); m.close(); } }, h("img", { src: media(p.thumb), alt: p.caption || "" }))));
+  });
+}
+
+// ---------- sign-up sheets ----------
+const TEMPLATES = {
+  potluck: { title: "Bring a dish", description: "Tell us what you're bringing.", slots: [["Main dish", 6, true], ["Side dish", 8, true], ["Dessert", 6, true], ["Drinks and ice", 3, false], ["Plates and napkins", 2, false]] },
+  volunteer: { title: "Help out", description: "", slots: [["Setup", 4], ["Check-in table", 2], ["Cleanup", 4]] },
+  blank: { title: "", description: "", slots: [["", 1]] },
+};
+
+function eventSheets(ev) {
+  const wrap = h("div");
+  const draw = () => {
+    clear(wrap);
+    ev.sheets.forEach((s) => wrap.append(sheetCard(s, ev, draw)));
+    wrap.append(h("section.a-section",
+      h("h2", ev.sheets.length ? "Add another sign-up" : "Add a sign-up"),
+      h("div.templates",
+        [["potluck", "Potluck dishes", "Mains, sides, desserts, drinks"], ["volunteer", "Volunteer shifts", "Timed shifts with a set number of people"], ["blank", "Blank", "Build your own slots"]].map(([k, t, d]) =>
+          h("button", { type: "button", onclick: () => openSheetEditor(ev, null, k, async () => { ev.sheets = (await api(`/api/admin/events/${ev.id}`)).sheets; draw(); }) }, h("b", t), h("span", d))))));
+  };
+  draw();
+  return wrap;
+}
+
+function sheetCard(s, ev, redraw) {
+  const reload = async () => {
+    if (ev) ev.sheets = (await api(`/api/admin/events/${ev.id}`)).sheets;
+    redraw();
+  };
+  return h("div.sheet-card",
+    h("div.sheet-card-head",
+      h("div", h("h3", s.title), h("div.a-sub", `${s.filled} of ${s.capacity} filled`, s.status !== "open" ? ", " : "", s.status !== "open" ? pill(s.status) : null)),
+      h("div.row",
+        h("button.btn.small.ghost", { type: "button", onclick: csv(`/api/admin/sheets/${s.id}/export.csv`) }, icon("download", 16), "CSV"),
+        h("button.btn.small.ghost", { type: "button", onclick: () => openSheetEditor(ev, s, null, reload) }, icon("edit", 16), "Edit"),
+        h("button.btn.small.ghost", { type: "button", "aria-label": "Delete sign-up", onclick: async () => {
+          if (await confirmBox(`Delete “${s.title}” and everyone signed up for it?`)) { await api(`/api/admin/sheets/${s.id}`, { method: "DELETE" }); toast("Sign-up deleted"); reload(); }
+        } }, icon("trash", 16)))),
+    h("div.roster", s.slots.map((sl) => h("div",
+      h("div.slot-name", h("span", sl.title, sl.starts_at ? h("span.muted", { style: { fontWeight: 500 } }, "  " + timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : null), h("span.muted.small", `${sl.taken} of ${sl.capacity}`)),
+      sl.signups.length ? sl.signups.map((u) => h("div.who", h("span.strong", u.name), h("a", { href: `mailto:${u.email}`, class: "muted" }, u.email), h("span", u.item || (u.qty > 1 ? `×${u.qty}` : "")),
+        h("button.icon-btn", { type: "button", "aria-label": `Remove ${u.name}`, onclick: async () => {
+          if (await confirmBox(`Remove ${u.name} from ${sl.title}?`, { ok: "Remove" })) { await api(`/api/admin/signups/${u.id}`, { method: "DELETE" }); reload(); }
+        } }, icon("close", 16)))) : h("div.who", h("span.muted", "No one yet"))))));
+}
+
+function openSheetEditor(ev, sheet, template, onSaved) {
+  const t = template ? TEMPLATES[template] : null;
+  const s = sheet ? JSON.parse(JSON.stringify(sheet)) : { title: t.title, description: t.description, status: "open", show_names: true, closes_at: "",
+    slots: t.slots.map(([title, capacity, ask]) => ({ title, capacity, ask_item: !!ask, note: "" })) };
+  const node = sheetForm(s, ev, async (saved) => { m.close(); toast(sheet ? "Sign-up saved" : "Sign-up added"); await onSaved(saved); });
+  const m = modal(h("div", h("h2", sheet ? "Edit sign-up" : "New sign-up"), node), { wide: true, label: "Sign-up editor" });
+}
+
+function sheetForm(s, ev, onSaved, events) {
+  const rows = h("div.rows-edit");
+  const evDate = ev ? ev.starts_at.slice(0, 10) : "";
+  const drawRows = () => {
+    clear(rows).append(s.slots.map((sl, i) => {
+      const up = () => { if (i) { [s.slots[i - 1], s.slots[i]] = [s.slots[i], s.slots[i - 1]]; drawRows(); } };
+      const down = () => { if (i < s.slots.length - 1) { [s.slots[i + 1], s.slots[i]] = [s.slots[i], s.slots[i + 1]]; drawRows(); } };
+      const bind = (k, conv = (x) => x) => (x) => { sl[k] = conv(x.target.type === "checkbox" ? x.target.checked : x.target.value); };
+      const tval = (v) => (v ? v.slice(11, 16) : "");
+      const toIso = (v) => (v ? `${(sl.starts_at || sl.ends_at || evDate || isoLocal(clubNow())).slice(0, 10)}T${v}` : "");
+      return h("div.row-edit",
+        h("div.mv", h("button", { type: "button", "aria-label": "Move up", onclick: up }, icon("up", 16)), h("button", { type: "button", "aria-label": "Move down", onclick: down }, icon("down", 16))),
+        h("input", { value: sl.title, placeholder: "Slot name", "aria-label": "Slot name", oninput: bind("title") }),
+        h("input", { type: "number", min: 1, value: sl.capacity, "aria-label": "How many", oninput: bind("capacity", Number) }),
+        h("input", { type: "time", value: tval(sl.starts_at), "aria-label": "Start time", oninput: (x) => (sl.starts_at = toIso(x.target.value)) }),
+        h("input", { type: "time", value: tval(sl.ends_at), "aria-label": "End time", oninput: (x) => (sl.ends_at = toIso(x.target.value)) }),
+        h("label.check", h("input", { type: "checkbox", checked: sl.ask_item, onchange: bind("ask_item") }), "Ask what"),
+        h("button.icon-btn", { type: "button", "aria-label": "Remove slot", onclick: () => { s.slots.splice(i, 1); drawRows(); } }, icon("trash", 18)));
+    }));
+  };
+  drawRows();
+  const form = h("form.stack",
+    field("Title", input("title", { value: s.title, required: true, placeholder: "Bring a dish" })),
+    field("Note", input("description", { value: s.description }), { optional: true }),
+    events ? field("Event", sel("event_id", [["", "No event"], ...events.map((e) => [e.id, `${e.title}, ${dateCell(e.starts_at)}`])], s.event_id)) : null,
+    h("div",
+      h("div.row-head", h("span"), h("span", "Slot"), h("span", "How many"), h("span", "Starts"), h("span", "Ends"), h("span", "", hint("Ask people what they're bringing, like a dish name.")), h("span")),
+      rows,
+      h("button.btn.small.ghost", { type: "button", style: { marginTop: "12px" }, onclick: () => { s.slots.push({ title: "", capacity: 1, ask_item: false }); drawRows(); $$(".row-edit input", rows).at(-4)?.focus(); } }, icon("plus", 16), "Add slot")),
+    h("div.two",
+      field("Status", sel("status", [["open", "Open"], ["closed", "Closed"], ["hidden", "Hidden"]], s.status)),
+      field("Closes", input("closes_at", { type: "datetime-local", value: s.closes_at || "" }), { optional: true })),
+    sw("show_names", "Show names publicly", s.show_names, { hintText: "Shows first name and last initial next to each slot." }),
+    h("p.form-error"),
+    h("div.row.end", h("button.btn", { type: "submit" }, "Save sign-up")));
+  onSubmit(form, async (v) => {
+    const body = { ...v, event_id: events ? v.event_id || null : ev?.id || null, slots: s.slots };
+    if (!s.slots.some((x) => x.title?.trim())) throw new Error("Add at least one slot.");
+    const r = s.id ? await api(`/api/admin/sheets/${s.id}`, { method: "PUT", body }) : await api("/api/admin/sheets", { method: "POST", body });
+    await onSaved(r);
+  });
+  return form;
+}
+
+async function sheetsList() {
+  const list = await api("/api/admin/sheets");
+  const body = list.length ? h("div.tbl-wrap", h("table.tbl",
+    h("thead", h("tr", h("th", "Sign-up"), h("th", "Event"), h("th", "Status"), h("th.num", "Filled"))),
+    h("tbody", list.map((s) => h("tr.click", { onclick: () => go(s.event_id ? `/admin/events/${s.event_id}?tab=signups` : `/admin/signups/${s.id}`) },
+      h("td.strong", s.title), h("td", s.event ? h("span", s.event.title, h("div.sub", dateCell(s.event.starts_at))) : h("span.muted", "Standalone")),
+      h("td", pill(s.closed && s.status === "open" ? "closed" : s.status)), h("td.num", `${s.filled} / ${s.capacity}`))))))
+    : empty("No sign-ups yet.");
+  return h("div", head("Sign-ups", { actions: [aLink("/signups/new", { class: "btn" }, icon("plus", 18), "New sign-up")] }), body);
+}
+
+async function sheetEditorPage(id) {
+  const events = (await api("/api/admin/events")).filter((e) => e.starts_at >= isoLocal(clubNow()).slice(0, 10));
+  if (id === "new") {
+    const s = { title: "", description: "", status: "open", show_names: true, slots: [{ title: "", capacity: 1, ask_item: false }] };
+    return h("div", head("New sign-up", { back: ["/signups", "Sign-ups"] }), sheetForm(s, null, (r) => {
+      toast("Sign-up created"); go(r.event_id ? `/admin/events/${r.event_id}?tab=signups` : `/admin/signups/${r.id}`);
+    }, events));
+  }
+  const s = await api(`/api/admin/sheets/${id}`);
+  const wrap = h("div");
+  const draw = async () => {
+    const fresh = await api(`/api/admin/sheets/${id}`);
+    clear(wrap).append(sheetCard(fresh, null, draw));
+  };
+  wrap.append(sheetCard(s, null, draw));
+  return h("div", head(s.title, { back: ["/signups", "Sign-ups"], actions: [link(`/signups/${s.id}`, { class: "btn small ghost", target: "_blank" }, icon("external", 16), "View")] }),
+    wrap,
+    h("section.a-section", h("h2", "Edit"), sheetForm(s, null, () => { toast("Saved"); draw(); }, events)));
+}
+
+function rsvpTab(ev) {
+  const going = ev.rsvps.filter((r) => r.status === "going");
+  const total = going.reduce((a, r) => a + 1 + r.guests, 0);
+  const wrap = h("div");
+  const draw = () => clear(wrap).append(
+    h("div.a-head", h("div", h("h2.h3", `${total} going`), h("div.a-sub", `${plural(going.length, "RSVP")}, ${total - going.length} guests`)),
+      h("div.row",
+        aLink(`/email?event=${ev.id}`, { class: "btn small ghost" }, icon("mail", 16), "Email attendees"),
+        h("button.btn.small.ghost", { type: "button", onclick: csv(`/api/admin/events/${ev.id}/export.csv`) }, icon("download", 16), "Roster CSV"))),
+    ev.rsvps.length ? h("div.tbl-wrap", h("table.tbl",
+      h("thead", h("tr", h("th", "Name"), h("th", "Email"), h("th", "Status"), h("th.num", "Guests"), h("th", "When"), h("th"))),
+      h("tbody", ev.rsvps.map((r) => h("tr",
+        h("td.strong", r.name), h("td", h("a", { href: `mailto:${r.email}` }, r.email)), h("td", pill(r.status === "going" ? "yes" : r.status === "no" ? "closed" : "pending", r.status === "no" ? "Not going" : r.status[0].toUpperCase() + r.status.slice(1))),
+        h("td.num", r.guests || "–"), h("td.sub", ago(r.created)),
+        h("td.actions", h("button.icon-btn", { type: "button", "aria-label": `Remove ${r.name}`, onclick: async () => {
+          if (await confirmBox(`Remove ${r.name}'s RSVP?`, { ok: "Remove" })) { await api(`/api/admin/rsvps/${r.id}`, { method: "DELETE" }); ev.rsvps.splice(ev.rsvps.indexOf(r), 1); draw(); }
+        } }, icon("close", 16))))))))
+      : empty("No RSVPs yet.", aLink(`/events/${ev.id}?tab=invite`, { class: "btn dark", onclick: () => setTimeout(() => $$(".tabs button").find((b) => b.dataset.t === "invite")?.click(), 0) }, "Send an invite")));
+  draw();
+  return wrap;
+}
+
+function inviteTab(ev) {
+  return composer({ subject: `You're invited: ${ev.title}`, body: `${ev.summary || ""}\n\nRSVP on the site so we know how many to plan for.`.trim(), event_id: ev.id, audience: "subscribers", lockEvent: true });
+}
+
+// ---------- polls ----------
+async function pollsList() {
+  const list = await api("/api/admin/polls");
+  return h("div", head("Polls", { actions: [aLink("/polls/new", { class: "btn" }, icon("plus", 18), "New poll")] }),
+    list.length ? h("div.tbl-wrap", h("table.tbl",
+      h("thead", h("tr", h("th", "Poll"), h("th", "Status"), h("th.num", "Responses"), h("th", "Closes"))),
+      h("tbody", list.map((p) => h("tr.click", { onclick: () => go(`/admin/polls/${p.id}`) },
+        h("td", h("span.strong", p.title), p.event ? h("div.sub", p.event.title) : null),
+        h("td", pill(p.closed && p.status === "open" ? "closed" : p.status)), h("td.num", p.responses), h("td.sub", p.closes_at ? dateCell(p.closes_at) : "–"))))))
+      : empty("No polls yet.", aLink("/polls/new", { class: "btn dark" }, "New poll")));
+}
+
+async function pollEditor(id) {
+  const isNew = id === "new";
+  const [p, events] = await Promise.all([isNew ? null : api(`/api/admin/polls/${id}`), api("/api/admin/events")]);
+  const poll = p || { title: "", intro: "", status: "open", results: "after", collect_name: true, one_per_email: true, closes_at: "", event_id: null,
+    questions: [{ kind: "single", prompt: "", options: ["", ""], required: true }] };
+  const body = h("div");
+  const tab = isNew ? "build" : query().get("tab") || (poll.responses ? "results" : "build");
+  const setTab = (t) => {
+    $$(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.t === t)));
+    clear(body).append(t === "results" ? pollResults(poll) : pollBuilder(poll, events));
+  };
+  const page = h("div",
+    head(isNew ? "New poll" : poll.title, { back: ["/polls", "Polls"], actions: isNew ? null : [
+      h("button.btn.small.ghost", { type: "button", onclick: () => copy(location.origin + (CFG.hashRouting ? location.pathname + "#" : "") + `/polls/${poll.slug}`) }, icon("link", 16), "Copy link"),
+      link(`/polls/${poll.slug}`, { class: "btn small ghost", target: "_blank" }, icon("external", 16), "View"),
+      h("button.btn.small.ghost", { type: "button", onclick: async () => {
+        if (await confirmBox(`Delete “${poll.title}” and its ${plural(poll.responses, "response")}?`)) { await api(`/api/admin/polls/${id}`, { method: "DELETE" }); toast("Poll deleted"); go("/admin/polls"); }
+      } }, icon("trash", 16), "Delete")] }),
+    isNew ? null : h("div.tabs", { role: "tablist" }, [["build", "Questions"], ["results", "Results", poll.responses]].map(([t, l, n]) =>
+      h("button", { type: "button", role: "tab", "data-t": t, "aria-selected": String(t === tab), onclick: () => setTab(t) }, l, n != null ? h("span.n", n) : null))),
+    body);
+  setTab(tab);
+  return page;
+}
+
+function pollBuilder(poll, events) {
+  const qs = poll.questions.map((q) => ({ ...q, options: [...(q.options || [])] }));
+  const list = h("div");
+  const draw = () => {
+    clear(list).append(qs.map((q, i) => {
+      const opts = h("div.list-edit");
+      const drawOpts = () => clear(opts).append(
+        q.options.map((o, j) => h("div.opt-edit", h("span.mk", { class: q.kind === "multi" ? "sq" : "" }),
+          h("input", { value: o, placeholder: `Choice ${j + 1}`, "aria-label": `Choice ${j + 1}`, oninput: (x) => (q.options[j] = x.target.value),
+            onkeydown: (x) => { if (x.key === "Enter") { x.preventDefault(); q.options.splice(j + 1, 0, ""); drawOpts(); $$("input", opts)[j + 1]?.focus(); } } }),
+          h("button.icon-btn", { type: "button", "aria-label": "Remove choice", onclick: () => { q.options.splice(j, 1); drawOpts(); } }, icon("close", 16)))),
+        h("div.opt-edit", h("span"), h("button.btn.small.ghost", { type: "button", style: { justifySelf: "start" }, onclick: () => { q.options.push(""); drawOpts(); $$("input", opts).at(-1)?.focus(); } }, icon("plus", 16), "Add choice")));
+      if (q.kind === "single" || q.kind === "multi") drawOpts();
+      return h("div.qcard",
+        h("div.qcard-top", h("span.n", i + 1),
+          h("input", { value: q.prompt, placeholder: "Question", "aria-label": `Question ${i + 1}`, oninput: (x) => (q.prompt = x.target.value) }),
+          sel("", Q_KINDS, q.kind, { "aria-label": "Question type", onchange: (x) => { q.kind = x.target.value; if ((q.kind === "single" || q.kind === "multi") && q.options.length < 2) q.options = ["", ""]; draw(); } }),
+          h("div.row", { style: { gap: "2px", flexWrap: "nowrap" } },
+            h("button.icon-btn", { type: "button", "aria-label": "Move up", disabled: i === 0, onclick: () => { [qs[i - 1], qs[i]] = [qs[i], qs[i - 1]]; draw(); } }, icon("up", 18)),
+            h("button.icon-btn", { type: "button", "aria-label": "Move down", disabled: i === qs.length - 1, onclick: () => { [qs[i + 1], qs[i]] = [qs[i], qs[i + 1]]; draw(); } }, icon("down", 18)),
+            h("button.icon-btn", { type: "button", "aria-label": "Delete question", onclick: () => { qs.splice(i, 1); draw(); } }, icon("trash", 18)))),
+        q.kind === "single" || q.kind === "multi" ? h("div", { style: { paddingLeft: "0" } }, opts) : h("div.qcard-foot", { style: { justifyContent: "flex-start" } }, h("span.muted.small", q.kind === "rating" ? "People pick 1 to 5." : "People type an answer.")),
+        h("div.qcard-foot", h("span"), sw("", "Required", q.required, { onchange: (x) => (q.required = x.target.checked) })));
+    }),
+    h("div.add-q", Q_KINDS.map(([k, t]) => h("button.btn.small.ghost", { type: "button", onclick: () => { qs.push({ kind: k, prompt: "", options: k === "single" || k === "multi" ? ["", ""] : [], required: true }); draw(); $$(".qcard input", list).filter((x) => x.getAttribute("aria-label")?.startsWith("Question")).at(-1)?.focus(); } }, icon("plus", 16), t))));
+  };
+  draw();
+  const statusSeg = h("div.seg");
+  let status = poll.status;
+  const drawStatus = () => clear(statusSeg).append([["draft", "Draft"], ["open", "Open"], ["closed", "Closed"]].map(([v, t]) => h("button", { type: "button", "aria-pressed": String(status === v), onclick: () => { status = v; drawStatus(); } }, t)));
+  drawStatus();
+  const form = h("form",
+    field("Title", input("title", { value: poll.title, required: true, placeholder: "Holiday party: pick the theme" })),
+    field("Intro", input("intro", { value: poll.intro }), { optional: true }),
+    h("div", { style: { marginTop: "12px" } }, list),
+    h("p.form-error"),
+    null);
+  form.id = "poll-form";
+  const panel = h("div.panel",
+    h("div.panel-block", h("span.field-label", "Status"), statusSeg),
+    h("div.panel-block",
+      field("Results", sel("results", [["after", "Show after the poll closes"], ["public", "Show right after voting"], ["admin", "Only admins"]], poll.results)),
+      field("Closes", input("closes_at", { type: "datetime-local", value: poll.closes_at || "" }), { optional: true }),
+      field("Event", sel("event_id", [["", "None"], ...events.map((e) => [e.id, `${e.title}, ${dateCell(e.starts_at)}`])], poll.event_id), { optional: true })),
+    h("div.panel-block",
+      sw("collect_name", "Ask for name and email", poll.collect_name),
+      sw("one_per_email", "One response per email", poll.one_per_email, { hintText: "Sending again updates the earlier answers." })));
+  onSubmit(form, async (v) => {
+    const body = { title: v.title, intro: v.intro, status, results: $("[name=results]", panel).value, closes_at: $("[name=closes_at]", panel).value,
+      event_id: $("[name=event_id]", panel).value || null, collect_name: $("[name=collect_name]", panel).checked, one_per_email: $("[name=one_per_email]", panel).checked,
+      questions: qs.map((q) => ({ ...q, options: q.options.filter((o) => o.trim()) })) };
+    if (poll.id) {
+      await api(`/api/admin/polls/${poll.id}`, { method: "PUT", body });
+      toast("Poll saved");
+    } else {
+      const r = await api("/api/admin/polls", { method: "POST", body });
+      toast("Poll created");
+      go(`/admin/polls/${r.id}?tab=build`);
+    }
+  });
+  return h("div.editor", form, panel, h("div.savebar", h("button.btn", { type: "submit", form: "poll-form" }, poll.id ? "Save poll" : "Create poll")));
+}
+
+function pollResults(poll) {
+  if (!poll.responses) return empty("No responses yet.", h("button.btn.dark", { type: "button", onclick: () => copy(location.origin + `/polls/${poll.slug}`) }, icon("link", 18), "Copy poll link"));
+  return h("div",
+    h("div.a-head", h("h2.h3", plural(poll.responses, "response")), h("button.btn.small.ghost", { type: "button", onclick: csv(`/api/admin/polls/${poll.id}/export.csv`) }, icon("download", 16), "Responses CSV")),
+    h("div", { style: { maxWidth: "760px" } }, results(poll.tally)));
+}
+
+// ---------- gallery ----------
+async function galleryAdmin() {
+  const [photos, events, tags] = await Promise.all([api("/api/admin/photos"), api("/api/admin/events"), api("/api/admin/tags")]);
+  const st = { show: query().get("show") || (photos.some((p) => p.status === "pending") ? "pending" : "all"), selected: new Set() };
+  const evOpts = [["", "No event"], ...events.map((e) => [e.id, `${e.title}, ${dateCell(e.starts_at)}`])];
+  const body = h("div");
+  const bulk = h("div");
+  const grid = h("div.pgrid");
+  const reload = async () => { const fresh = await api("/api/admin/photos"); photos.splice(0, photos.length, ...fresh); st.selected.clear(); draw(); refreshCounts(); };
+
+  // uploader
+  const files = [];
+  const thumbs = h("div.thumbs");
+  const fi = h("input", { type: "file", accept: "image/*", multiple: true, hidden: true, onchange: (e) => add(e.target.files) });
+  const drop = h("div.dropzone", { tabindex: 0, role: "button", onclick: () => fi.click(), onkeydown: (e) => (e.key === "Enter" || e.key === " ") && fi.click() },
+    icon("image", 28), h("b", "Add photos"), h("span.small", "Drop images here or choose them"));
+  const add = (list) => { for (const f of list) if (f.type.startsWith("image/")) { files.push(f); thumbs.append(h("img", { src: URL.createObjectURL(f), alt: "" })); } drop.querySelector("b").textContent = files.length ? plural(files.length, "photo") + " ready" : "Add photos"; };
+  ["dragenter", "dragover"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach((t) => drop.addEventListener(t, (e) => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", (e) => add(e.dataTransfer.files));
+  const upTags = new Set();
+  const upTagBox = h("div.chips-edit");
+  const drawUpTags = () => clear(upTagBox).append(tags.map((t) => tagChip(t, { active: upTags.has(t.id), onclick: () => { upTags.has(t.id) ? upTags.delete(t.id) : upTags.add(t.id); drawUpTags(); } })));
+  drawUpTags();
+  const upForm = h("form.stack",
+    field("Event", sel("event_id", evOpts, ""), { hintText: "Photos pick up the event's tags automatically." }),
+    h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Tags"), upTagBox),
+    h("p.form-error"),
+    h("button.btn", { type: "submit" }, "Upload"));
+  onSubmit(upForm, async (v) => {
+    if (!files.length) throw new Error("Add some photos first.");
+    const fd = new FormData();
+    files.forEach((f) => fd.append("files", f));
+    fd.append("event_id", v.event_id); fd.append("tag_ids", [...upTags].join(","));
+    const r = await api("/api/admin/photos", { method: "POST", form: fd });
+    files.length = 0; clear(thumbs); drop.querySelector("b").textContent = "Add photos";
+    toast(`${plural(r.ids.length, "photo")} added` + (r.errors.length ? `, ${r.errors.length} skipped` : ""));
+    st.show = "all"; reload();
+  });
+
+  function draw() {
+    const counts = { all: photos.filter((p) => p.status === "approved").length, pending: photos.filter((p) => p.status === "pending").length, hidden: photos.filter((p) => p.status === "hidden").length };
+    const list = photos.filter((p) => st.show === "all" ? p.status === "approved" : p.status === st.show);
+    clear(body).append(h("div.row", { style: { justifyContent: "space-between", marginBottom: "18px" } },
+      h("div.seg", [["all", "Published"], ["pending", "To review"], ["hidden", "Hidden"]].map(([v, t]) =>
+        h("button", { type: "button", "aria-pressed": String(st.show === v), onclick: () => { st.show = v; st.selected.clear(); draw(); } }, t, h("span", { style: { opacity: .6 } }, counts[v])))),
+      list.length ? h("button.btn.small.ghost", { type: "button", onclick: () => { list.forEach((p) => st.selected.add(p.id)); draw(); } }, "Select all") : null));
+    clear(bulk);
+    if (st.selected.size) {
+      const ids = [...st.selected];
+      const act = async (action, extra = {}) => { await api("/api/admin/photos/bulk", { method: "POST", body: { ids, action, ...extra } }); toast("Updated"); reload(); };
+      bulk.append(h("div.bulk",
+        h("b", `${st.selected.size} selected`),
+        st.show !== "all" ? h("button.btn.small", { type: "button", onclick: () => act("approved") }, "Publish") : null,
+        st.show !== "hidden" ? h("button.btn.small.ghost", { type: "button", onclick: () => act("hidden") }, "Hide") : null,
+        sel("", [["", "Add tag…"], ...tags.map((t) => [t.id, t.name])], "", { "aria-label": "Add tag", onchange: (e) => e.target.value && act("tag", { tag_ids: [e.target.value] }) }),
+        sel("", [["", "Set event…"], ["0", "No event"], ...events.map((e) => [e.id, e.title])], "", { "aria-label": "Set event", onchange: (e) => e.target.value && act("event", { event_id: Number(e.target.value) || null }) }),
+        h("button.btn.small.ghost", { type: "button", onclick: async () => { if (await confirmBox(`Delete ${plural(ids.length, "photo")}? This can't be undone.`)) act("delete"); } }, icon("trash", 16), "Delete"),
+        h("button.icon-btn", { type: "button", "aria-label": "Clear selection", style: { color: "#fff", marginLeft: "auto" }, onclick: () => { st.selected.clear(); draw(); } }, icon("close"))));
+    }
+    clear(grid);
+    if (!list.length) grid.append(h("p.muted", st.show === "pending" ? "Nothing to review." : "No photos here."));
+    list.forEach((p) => {
+      const on = st.selected.has(p.id);
+      grid.append(h("button.pthumb", { type: "button", class: (on ? "on " : "") + (p.status === "hidden" ? "hidden" : ""), "aria-pressed": String(on),
+        onclick: (e) => { if (st.selected.size || e.shiftKey || e.metaKey) { on ? st.selected.delete(p.id) : st.selected.add(p.id); draw(); } else editPhoto(p); } },
+        h("img", { src: media(p.thumb), alt: p.caption || "", loading: "lazy" }),
+        h("span.sel", { onclick: (e) => { e.stopPropagation(); on ? st.selected.delete(p.id) : st.selected.add(p.id); draw(); } }, icon("check")),
+        p.status === "pending" ? pill("pending", "Review") : null));
+    });
+  }
+  function editPhoto(p) {
+    const ptags = new Set(p.tag_ids);
+    const box = h("div.chips-edit");
+    const dt = () => clear(box).append(tags.map((t) => tagChip(t, { active: ptags.has(t.id), onclick: () => { ptags.has(t.id) ? ptags.delete(t.id) : ptags.add(t.id); dt(); } })));
+    dt();
+    const form = h("form",
+      h("img", { src: media(p.src), alt: "", style: { borderRadius: "10px", maxHeight: "46vh", width: "100%", objectFit: "contain", background: "var(--mist)" } }),
+      p.submitted_by && p.status === "pending" ? h("p.muted.small", { style: { margin: 0 } }, `Shared by ${p.submitted_by}`) : null,
+      field("Caption", input("caption", { value: p.caption }), { optional: true }),
+      field("Event", sel("event_id", evOpts, p.event_id)),
+      h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Tags"), box),
+      field("Status", sel("status", [["approved", "Published"], ["pending", "To review"], ["hidden", "Hidden"]], p.status)),
+      h("p.form-error"),
+      h("div.row.end",
+        h("button.btn.ghost", { type: "button", onclick: async () => { if (await confirmBox("Delete this photo?")) { await api("/api/admin/photos/bulk", { method: "POST", body: { ids: [p.id], action: "delete" } }); m.close(); reload(); } } }, "Delete"),
+        h("button.btn", { type: "submit" }, "Save")));
+    onSubmit(form, async (v) => {
+      await api(`/api/admin/photos/${p.id}`, { method: "PUT", body: { ...v, event_id: v.event_id || null, tag_ids: [...ptags] } });
+      m.close(); toast("Photo saved"); reload();
+    });
+    const m = modal(h("div", h("h2", "Photo"), form), { label: "Edit photo" });
+  }
+  draw();
+  return h("div", head("Gallery"),
+    h("div.upload-row", h("div.stack", drop, fi, thumbs), upForm),
+    body, bulk, grid);
+}
+
+// ---------- messages ----------
+async function inbox() {
+  const list = await api("/api/admin/messages");
+  const st = { id: list.find((m) => !m.archived)?.id, archived: false };
+  const listEl = h("div.inbox-list");
+  const read = h("div.inbox-read");
+  const draw = () => {
+    const shown = list.filter((m) => !!m.archived === st.archived);
+    clear(listEl).append(shown.length ? shown.map((m) => h("button.inbox-item", { type: "button", class: m.read ? "" : "unread", "aria-selected": String(m.id === st.id), onclick: () => open(m) },
+      h("b", m.name, h("time", ago(m.created))), h("div.s", m.subject || "No subject"), h("div.p", m.body))) : h("p.muted", { style: { padding: "20px 0" } }, st.archived ? "Nothing archived." : "Inbox zero."));
+    const cur = list.find((m) => m.id === st.id && !!m.archived === st.archived);
+    clear(read).append(cur ? h("div",
+      h("h2", cur.subject || "No subject"),
+      h("div.from", h("b", { style: { color: "var(--ink)" } }, cur.name), ` <${cur.email}>, ${longDate(parse(cur.created))} at ${time(parse(cur.created))}`),
+      h("div.body", cur.body),
+      h("div.row",
+        h("a.btn", { href: `mailto:${cur.email}?subject=${encodeURIComponent("Re: " + (cur.subject || "Your message"))}` }, icon("mail", 18), "Reply"),
+        h("button.btn.ghost", { type: "button", onclick: async () => { await api(`/api/admin/messages/${cur.id}`, { method: "PUT", body: { archived: !cur.archived } }); cur.archived = cur.archived ? 0 : 1; st.id = null; draw(); } }, cur.archived ? "Move to inbox" : "Archive"),
+        h("button.btn.ghost", { type: "button", onclick: async () => { if (await confirmBox("Delete this message?")) { await api(`/api/admin/messages/${cur.id}`, { method: "DELETE" }); list.splice(list.indexOf(cur), 1); st.id = null; draw(); } } }, "Delete")))
+      : h("p.muted", "Pick a message."));
+  };
+  const open = async (m) => {
+    st.id = m.id;
+    if (!m.read) { m.read = 1; api(`/api/admin/messages/${m.id}`, { method: "PUT", body: { read: true } }).then(refreshCounts); }
+    draw();
+  };
+  const first = list.find((m) => m.id === st.id);
+  if (first && !first.read) open(first); else draw();
+  const seg = h("div.seg", [[false, "Inbox"], [true, "Archived"]].map(([v, t]) => h("button", { type: "button", "aria-pressed": String(st.archived === v), onclick: (e) => { st.archived = v; st.id = null; $$("button", seg).forEach((b) => b.setAttribute("aria-pressed", String(b === e.currentTarget))); draw(); } }, t)));
+  return h("div", head("Messages", { actions: [seg] }), h("div.inbox", listEl, read));
+}
+
+// ---------- people ----------
+async function people() {
+  const list = await api("/api/admin/people");
+  const tbody = h("tbody");
+  let q = "";
+  const draw = () => {
+    const shown = list.filter((p) => !q || (p.name || "").toLowerCase().includes(q) || p.email.includes(q));
+    clear(tbody).append(shown.map((p) => h("tr",
+      h("td", h("span.strong", p.name || "–"), h("div.sub", p.email)),
+      h("td.num", p.events || "–"), h("td.num", p.signups || "–"),
+      h("td", h("label.switch", { style: { justifyContent: "flex-start" } }, h("input", { type: "checkbox", checked: !!p.active, "aria-label": `${p.email} on mailing list`, onchange: async (e) => {
+        await api("/api/admin/people", { method: "PUT", body: { email: p.email, name: p.name, active: e.target.checked } }); p.active = e.target.checked ? 1 : 0;
+        toast(e.target.checked ? "Added to the list" : "Removed from the list");
+      } }))))));
+  };
+  draw();
+  const addForm = h("form.stack",
+    field("Emails", h("textarea", { name: "emails", rows: 5, placeholder: "kalani@example.com\nMaria Santos <maria@example.com>" }), { hintText: "One per line, or separated by commas." }),
+    h("div.row.end", h("button.btn", { type: "submit" }, "Add to list")));
+  onSubmit(addForm, async (v) => {
+    const r = await api("/api/admin/people", { method: "POST", body: v });
+    m?.close(); toast(`${plural(r.added, "person", "people")} added`); go("/admin/people", { replace: true });
+  });
+  let m;
+  const active = list.filter((p) => p.active).length;
+  return h("div",
+    head("People", { sub: `${active} on the mailing list, ${list.length} total`, actions: [
+      h("button.btn.small.ghost", { type: "button", onclick: csv("/api/admin/people/export.csv") }, icon("download", 16), "CSV"),
+      h("button.btn", { type: "button", onclick: () => (m = modal(h("div", h("h2", "Add people"), addForm), { label: "Add people" })) }, icon("plus", 18), "Add people")] }),
+    h("input.search", { type: "search", placeholder: "Search", "aria-label": "Search people", style: { marginBottom: "16px" }, oninput: (e) => { q = e.target.value.toLowerCase(); draw(); } }),
+    h("div.tbl-wrap", h("table.tbl", h("thead", h("tr", h("th", "Person"), h("th.num", "RSVPs"), h("th.num", "Sign-ups"), h("th", "Mailing list", hint("People on the list get announcements and invites. Everyone still gets confirmations and reminders for what they join.")))), tbody)));
+}
+
+// ---------- email ----------
+function composer({ subject = "", body = "", event_id = null, audience = "subscribers", lockEvent = false, events = [] } = {}) {
+  const st = { type: audience, count: null };
+  const countEl = h("span.muted.small");
+  const audBox = h("div.stack");
+  const form = h("form.stack");
+  const spec = () => ({ type: st.type, event_id: st.type === "event" ? (lockEvent ? event_id : $("[name=aud_event]", form)?.value) : null, emails: $("[name=aud_emails]", form)?.value });
+  const recount = async () => {
+    try { const r = await api("/api/admin/email/preview", { method: "POST", body: { audience: spec() } }); countEl.textContent = `Goes to ${plural(r.count, "person", "people")}`; }
+    catch { countEl.textContent = ""; }
+  };
+  const drawAud = () => {
+    clear(audBox).append(
+      h("div.seg", [["subscribers", "Mailing list"], ["everyone", "Everyone"], ["event", lockEvent ? "This event's attendees" : "Event attendees"], ["custom", "Specific people"]].map(([v, t]) =>
+        h("button", { type: "button", "aria-pressed": String(st.type === v), onclick: () => { st.type = v; drawAud(); } }, t))),
+      st.type === "event" && !lockEvent ? field("Event", sel("aud_event", events.map((e) => [e.id, `${e.title}, ${dateCell(e.starts_at)}`]), event_id, { onchange: recount })) : null,
+      st.type === "custom" ? field("Emails", h("textarea", { name: "aud_emails", rows: 3, oninput: recount })) : null,
+      st.type === "everyone" ? h("p.muted.small", { style: { margin: 0 } }, "The mailing list plus anyone who has RSVPed or signed up, minus people who unsubscribed.") : null,
+      countEl);
+    recount();
+  };
+  form.append(
+    h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "To"), audBox),
+    lockEvent ? null : field("Attach an event", sel("event_id", [["", "None"], ...events.map((e) => [e.id, `${e.title}, ${dateCell(e.starts_at)}`])], event_id),
+      { optional: true, hintText: "Adds the date, place, an RSVP button, and a calendar file." }),
+    field("Subject", input("subject", { value: subject, required: true })),
+    field("Message", h("textarea", { name: "body", rows: 9, required: true }, body), { hintText: "Blank lines start new paragraphs." }),
+    h("p.form-error"),
+    h("div.row.end", h("button.btn", { type: "submit" }, icon("send", 18), "Send")));
+  drawAud();
+  onSubmit(form, async (v) => {
+    const payload = { subject: v.subject, body: v.body, audience: spec(), event_id: lockEvent ? event_id : v.event_id || null };
+    const n = countEl.textContent.replace("Goes to ", "");
+    if (!(await confirmBox(`Send “${v.subject}” to ${n}?`, { ok: "Send", danger: false }))) return;
+    const r = await api("/api/admin/email/send", { method: "POST", body: payload });
+    toast(r.smtp_ready ? `Sending to ${plural(r.queued, "person", "people")}` : `Saved ${plural(r.queued, "email")}. They send once email is set up.`);
+    form.reset();
+  });
+  return h("div", { style: { maxWidth: "760px" } }, form);
+}
+
+async function emailPage() {
+  const [events, outbox, s] = await Promise.all([api("/api/admin/events"), api("/api/admin/outbox"), api("/api/admin/settings")]);
+  const upcoming = events.filter((e) => e.starts_at >= isoLocal(clubNow()).slice(0, 10) && e.status === "published").reverse();
+  const q = query();
+  const pre = q.get("event");
+  const held = outbox.filter((o) => o.status === "held" || o.status === "failed").length;
+  const out = h("div.tbl-wrap", outbox.length ? h("table.tbl",
+    h("thead", h("tr", h("th", "To"), h("th", "Subject"), h("th", "Type"), h("th", "Status"), h("th", "When"))),
+    h("tbody", outbox.slice(0, 100).map((o) => h("tr.click", { onclick: async () => {
+      const full = await api(`/api/admin/outbox/${o.id}`);
+      const frame = h("iframe.preview-frame", { title: "Email preview", sandbox: "" });
+      frame.srcdoc = full.html;
+      modal(h("div", h("h2", full.subject), full.error ? h("div.callout", icon("info"), full.error) : null, frame), { wide: true, label: "Email preview" });
+    } },
+      h("td", o.to_email), h("td.strong", o.subject), h("td.sub", o.kind), h("td", pill(o.status, o.status === "held" ? "Waiting" : null)), h("td.sub", ago(o.created))))))
+    : h("p.muted", "Nothing sent yet."));
+  return h("div",
+    head("Email"),
+    !s.smtp_ready ? h("div.callout", icon("info"), h("span", "Email isn't connected yet, so messages wait in the outbox. ", aLink("/settings#email", {}, "Set up email"))) : null,
+    composer({ events: upcoming, audience: pre ? "event" : "subscribers", event_id: pre ? Number(pre) : null }),
+    h("section.a-section",
+      h("h2", "Outbox", h("div.row",
+        held && s.smtp_ready ? h("button.btn.small", { type: "button", onclick: async () => { await api("/api/admin/outbox/retry", { method: "POST" }); toast("Sending"); go("/admin/email", { replace: true }); } }, `Send ${held} waiting`) : null,
+        held ? h("button.btn.small.ghost", { type: "button", onclick: async () => { if (await confirmBox(`Discard ${plural(held, "unsent email")}?`, { ok: "Discard" })) { await api("/api/admin/outbox/clear", { method: "POST" }); go("/admin/email", { replace: true }); } } }, "Discard waiting") : null)),
+      out));
+}
+
+// ---------- settings ----------
+async function settings() {
+  const [s, admins, events, polls] = await Promise.all([api("/api/admin/settings"), api("/api/admin/admins"), api("/api/admin/events"), api("/api/admin/polls")]);
+  const save = async (patch, msg = "Saved") => { Object.assign(s, await api("/api/admin/settings", { method: "PUT", body: patch })); toast(msg); refreshSite(); };
+  const sec = (id, title, body, hintText) => h("section.settings-sec", { id }, h("div", h("h2", title, hintText ? hint(hintText) : null)), body);
+
+  // club
+  let accent = s.accent || "";
+  let palette = s.palette || "classic";
+  const PAL = { classic: ["Red, white & blue", "#0F2340", "#C8233B", "#F4ECD6"], ocean: ["Ocean", "#0B4552", "#C2185B", "#FFF1D6"] };
+  const palBox = h("div.palettes");
+  const preview = () => import("./app.js").then((A) => A.applyTheme({ palette, accent }));
+  const drawPal = () => clear(palBox).append(Object.entries(PAL).map(([k, [name, night, acc, moon]]) =>
+    h("button.palette", { type: "button", "aria-pressed": String(palette === k), onclick: () => { palette = k; accent = ""; drawPal(); drawSw(); preview(); } },
+      h("span.palette-chip", { style: { background: night } }, h("i", { style: { background: moon } }), h("i", { style: { background: acc } })), name)));
+  const swatches = h("div.swatches");
+  const drawSw = () => clear(swatches).append(ACCENTS.map(([c, n]) => h("button.swatch", { type: "button",
+    style: { "--c": c || PAL[palette][2] }, class: c ? "" : "theme-default", "aria-label": n, title: n, "aria-pressed": String(accent.toLowerCase() === c.toLowerCase()),
+    onclick: () => { accent = c; drawSw(); preview(); } })));
+  drawPal();
+  drawSw();
+  const club = h("form",
+    h("div.two", field("Club name", input("club_name", { value: s.club_name, required: true })), field("Organization", input("org_line", { value: s.org_line }), { optional: true })),
+    h("div.two", field("Club email", input("email", { type: "email", value: s.email }), { hintText: "Contact form messages go here. Replies to club emails go here too." }),
+      field("Site address", input("site_url", { type: "url", value: s.site_url, placeholder: "https://mahinaclub.org" }), { hintText: "Used for links inside emails." })),
+    field("Time zone", sel("timezone", [["Pacific/Honolulu", "Hawaiʻi"], ["America/Los_Angeles", "Pacific"], ["America/Denver", "Mountain"], ["America/Chicago", "Central"], ["America/New_York", "Eastern"], ["Asia/Tokyo", "Japan"], ["Pacific/Guam", "Guam"]], s.timezone)),
+    h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Colors"), palBox),
+    h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Button color", hint("Theme color follows the colors above. Pick another to override it.")), swatches),
+    field("Footer notice", h("textarea", { name: "disclaimer", rows: 3 }, s.disclaimer), { hintText: "Private organizations on an installation usually need this statement." }),
+    h("div", h("button.btn", { type: "submit" }, "Save")));
+  onSubmit(club, (v) => save({ ...v, accent, palette }));
+
+  // home
+  const open = polls.filter((p) => p.status === "open");
+  const upcoming = events.filter((e) => e.starts_at >= isoLocal(clubNow()) && e.status === "published").reverse();
+  const spot = s.spotlight || { kind: "next" };
+  const spotVal = spot.kind === "event" ? `event:${spot.id}` : spot.kind === "poll" ? `poll:${spot.id}` : spot.kind;
+  const SECTIONS = { coming: "Coming up", photos: "Photos", polls: "Polls", give: "Fundraising goal" };
+  const secs = (s.home_sections || []).map((x) => ({ ...x }));
+  const secBox = h("div.list-edit.sections-edit");
+  const drawSecs = () => clear(secBox).append(secs.map((x, i) => h("div.li",
+    h("label.switch", { style: { justifyContent: "flex-start", gap: "14px" } },
+      h("input", { type: "checkbox", role: "switch", checked: x.on, onchange: (e) => (x.on = e.target.checked) }), SECTIONS[x.key] || x.key),
+    h("span.row", { style: { gap: "2px", flexWrap: "nowrap" } },
+      h("button.icon-btn", { type: "button", "aria-label": `Move ${SECTIONS[x.key]} up`, disabled: i === 0, onclick: () => { [secs[i - 1], secs[i]] = [secs[i], secs[i - 1]]; drawSecs(); } }, icon("up", 18)),
+      h("button.icon-btn", { type: "button", "aria-label": `Move ${SECTIONS[x.key]} down`, disabled: i === secs.length - 1, onclick: () => { [secs[i + 1], secs[i]] = [secs[i], secs[i + 1]]; drawSecs(); } }, icon("down", 18))))));
+  drawSecs();
+  const home = h("form",
+    field("Featured at the top", sel("spot", [["next", "The next event"], ...upcoming.map((e) => [`event:${e.id}`, `Event: ${e.title}`]), ...open.map((p) => [`poll:${p.id}`, `Poll: ${p.title}`]), ["give", "Fundraising goal"], ["none", "Nothing"]], spotVal)),
+    h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Sections", hint("Turn sections on or off and set their order. You can also do this on the home page with Edit page.")), secBox),
+    h("div.two", field("Banner text", input("banner_text", { value: s.banner?.text || "", placeholder: "Potluck sign-ups are open" }), { optional: true }),
+      field("Banner link", input("banner_link", { value: s.banner?.link || "", placeholder: "/events/ohana-potluck" }), { optional: true })),
+    sw("banner_active", "Show the banner", s.banner?.active),
+    sw("moon_caption", "Show tonight's moon name", s.moon_caption, { hintText: "The Hawaiian name for tonight's moon, under the moon on the home page." }),
+    h("div", h("button.btn", { type: "submit" }, "Save")));
+  onSubmit(home, (v) => {
+    const [kind, id] = v.spot.split(":");
+    return save({ spotlight: { kind, id: id ? Number(id) : null }, home_sections: secs, moon_caption: v.moon_caption,
+      banner: { text: v.banner_text, link: v.banner_link, active: v.banner_active } });
+  });
+
+  // give
+  const uses = [...(s.donate_uses || [])];
+  const usesBox = h("div.list-edit");
+  const drawUses = () => clear(usesBox).append(uses.map((u, i) => h("div.li", h("input", { value: u, "aria-label": `Use ${i + 1}`, oninput: (e) => (uses[i] = e.target.value) }),
+    h("button.icon-btn", { type: "button", "aria-label": "Remove", onclick: () => { uses.splice(i, 1); drawUses(); } }, icon("close", 16)))),
+    h("div", h("button.btn.small.ghost", { type: "button", onclick: () => { uses.push(""); drawUses(); } }, icon("plus", 16), "Add")));
+  drawUses();
+  const g = s.donate_goal || {};
+  const give = h("form",
+    field("Venmo handle", input("venmo", { value: s.venmo, placeholder: "MahinaClub" }), { hintText: "Without the @. Leave blank to hide the Give page." }),
+    field("Goal name", input("goal_label", { value: g.label || "", placeholder: "Holiday party fund" }), { optional: true }),
+    h("div.two", field("Goal amount", input("goal", { type: "number", min: 0, value: g.goal || "" }), { optional: true }),
+      field("Raised so far", input("raised", { type: "number", min: 0, value: g.raised || "" }), { hintText: "Update this by hand as money comes in." })),
+    h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Where it goes"), usesBox),
+    h("div", h("button.btn", { type: "submit" }, "Save")));
+  onSubmit(give, (v) => save({ venmo: v.venmo.replace(/^@/, "").trim(), donate_goal: { label: v.goal_label, goal: Number(v.goal) || 0, raised: Number(v.raised) || 0 }, donate_uses: uses.filter((u) => u.trim()) }));
+
+  // officers
+  const off = (s.officers || []).map((o) => ({ ...o }));
+  const offBox = h("div.list-edit");
+  const drawOff = () => clear(offBox).append(off.map((o, i) => h("div.li.three",
+    h("input", { value: o.role, placeholder: "Role", "aria-label": "Role", oninput: (e) => (o.role = e.target.value) }),
+    h("input", { value: o.name, placeholder: "Name", "aria-label": "Name", oninput: (e) => (o.name = e.target.value) }),
+    h("input", { value: o.email, type: "email", placeholder: "Email (optional)", "aria-label": "Email", oninput: (e) => (o.email = e.target.value) }),
+    h("button.icon-btn", { type: "button", "aria-label": "Remove", onclick: () => { off.splice(i, 1); drawOff(); } }, icon("close", 16)))),
+    h("div", h("button.btn.small.ghost", { type: "button", onclick: () => { off.push({ role: "", name: "", email: "" }); drawOff(); } }, icon("plus", 16), "Add officer")));
+  drawOff();
+  const officers = h("form", offBox, h("div", h("button.btn", { type: "submit" }, "Save")));
+  onSubmit(officers, () => save({ officers: off.filter((o) => o.name.trim()) }));
+
+  // gallery
+  const gal = h("div.stack", sw("public_uploads", "Let visitors share photos", s.public_uploads, { onchange: (e) => save({ public_uploads: e.target.checked }),
+    hintText: "Shared photos wait in Gallery > To review until an admin publishes them." }));
+
+  // email
+  const smtp = s.smtp || {};
+  const mail = h("form",
+    s.smtp_from_env ? h("div.callout", icon("info"), "Email is configured by the server's environment settings. Changes here won't apply.") : null,
+    h("div", h("span.muted", s.smtp_ready ? "Connected. " : "Not connected yet. "), h("span.muted", "Works with any SMTP service, like Brevo, Resend, SendGrid, Postmark, or Google Workspace.")),
+    h("div.two", field("SMTP server", input("host", { value: smtp.host, placeholder: "smtp-relay.brevo.com" })),
+      h("div.two", field("Port", input("port", { type: "number", value: smtp.port || 587 })), field("Security", sel("security", [["starttls", "STARTTLS"], ["ssl", "SSL/TLS"], ["none", "None"]], smtp.security)))),
+    h("div.two", field("Username", input("user", { value: smtp.user, autocomplete: "off" })), field("Password", input("password", { type: "password", value: smtp.password, autocomplete: "new-password" }))),
+    field("Send from", input("from", { type: "email", value: smtp.from, placeholder: "events@mahinaclub.org" }), { hintText: "Must be an address your email service lets you send from." }),
+    h("p.form-error"),
+    h("div.row", h("button.btn", { type: "submit" }, "Save"),
+      h("button.btn.ghost", { type: "button", onclick: async (e) => {
+        e.target.disabled = true;
+        try { const r = await api("/api/admin/email/test", { method: "POST" }); toast(`Test sent to ${r.to}`); } catch (err) { toast(err.message, "error"); }
+        e.target.disabled = false;
+      } }, "Send a test")));
+  onSubmit(mail, (v) => save({ smtp: { host: v.host.trim(), port: Number(v.port) || 587, security: v.security, user: v.user.trim(), password: v.password, from: v.from.trim() } }, "Email settings saved"));
+
+  // admins
+  const adminList = h("div.list-edit", admins.map((a) => h("div.li", h("div", h("b", { style: { color: "var(--ink)" } }, a.name), h("div.muted.small", a.email)),
+    a.id === ME.id ? h("span.muted.small", "You") : h("button.btn.small.ghost", { type: "button", onclick: async () => { if (await confirmBox(`Remove ${a.name} as an admin?`, { ok: "Remove" })) { await api(`/api/admin/admins/${a.id}`, { method: "DELETE" }); go("/admin/settings", { replace: true }); } } }, "Remove"))));
+  const addAdmin = h("form.stack",
+    h("div.two", field("Name", input("name", { required: true })), field("Email", input("email", { type: "email", required: true }))),
+    STATE.password_login !== false ? pwField("Starting password", "password", { autocomplete: "new-password", isNew: true,
+      hintText: `At least ${STATE.min_password || 15} characters. Share it privately; they can change it after signing in.` })
+      : h("p.muted.small", { style: { margin: 0 } }, `They sign in with ${STATE.sso?.name || "single sign-on"} using this email.`),
+    h("p.form-error"), h("div", h("button.btn.ghost", { type: "submit" }, icon("plus", 16), "Add admin")));
+  onSubmit(addAdmin, async (v) => { await api("/api/admin/admins", { method: "POST", body: v }); toast("Admin added"); go("/admin/settings", { replace: true }); });
+  const pw = h("form.stack",
+    h("div.two", pwField("Current password", "current"), pwField("New password", "new", { autocomplete: "new-password", isNew: true })),
+    h("p.form-error"), h("div", h("button.btn.ghost", { type: "submit" }, "Change password")));
+  onSubmit(pw, async (v) => { await api("/api/admin/password", { method: "POST", body: v }); pw.reset(); toast("Password changed. Other devices are signed out."); });
+
+  const page = h("div", head("Settings"),
+    sec("club", "Club", club),
+    sec("home", "Home page", home),
+    sec("give", "Give", give),
+    sec("officers", "Officers", officers, "Listed on the Contact page."),
+    sec("gallery", "Gallery", gal),
+    sec("email", "Email", mail),
+    sec("admins", "Admins", h("div.stack", adminList, addAdmin)),
+    STATE.password_login !== false ? sec("password", "Your password", pw) : null);
+  const target = anchor();
+  if (target) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: "smooth" }), 80);
+  return page;
+}
