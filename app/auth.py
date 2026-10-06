@@ -15,6 +15,7 @@ sign in through any OpenID Connect provider (Pocket ID, Authentik, Authelia, Key
 Workspace, Microsoft Entra). Only emails already listed as admins get in.
 Set PASSWORD_LOGIN=0 to turn passwords off once single sign-on works.
 """
+import json
 import gzip
 import hashlib
 import hmac
@@ -192,9 +193,13 @@ def create_session(admin_id: int) -> str:
 def session_admin(tok: str | None):
     if not tok:
         return None
-    s = db.one("SELECT a.id, a.email, a.name, s.expires, s.token FROM sessions s JOIN admins a ON a.id=s.admin_id "
-               "WHERE s.token=?", (_digest(tok),))
+    s = db.one("SELECT a.id, a.email, a.name, a.role, a.perms, s.expires, s.token FROM sessions s "
+               "JOIN admins a ON a.id=s.admin_id WHERE s.token=?", (_digest(tok),))
     if s and s["expires"] > datetime.utcnow().isoformat():
+        try:
+            s["perms"] = set(json.loads(s["perms"] or "[]"))
+        except ValueError:
+            s["perms"] = set()
         return s
     return None
 

@@ -40,7 +40,7 @@ grab(pub, "/api/photos")
 
 for path in ["/api/admin/overview", "/api/admin/events", "/api/admin/sheets", "/api/admin/polls", "/api/admin/photos",
              "/api/admin/tags", "/api/admin/messages", "/api/admin/people", "/api/admin/outbox", "/api/admin/settings",
-             "/api/admin/admins"]:
+             "/api/admin/admins", "/api/admin/planning", "/api/admin/activity", "/api/admin/team"]:
     grab(adm, path)
 for e in data["/api/admin/events"]:
     grab(adm, f"/api/admin/events/{e['id']}")
@@ -48,9 +48,11 @@ for s in data["/api/admin/sheets"]:
     grab(adm, f"/api/admin/sheets/{s['id']}")
 for p in data["/api/admin/polls"]:
     grab(adm, f"/api/admin/polls/{p['id']}")
-data["/api/admin/state"] = {"setup": True, "admin": {"id": 1, "email": "admin@example.com", "name": "Kalani"},
-                            "password_login": True, "sso": None, "min_password": 15}
-data["/api/admin/admins"] = [{"id": 1, "email": "admin@example.com", "name": "Kalani", "created": "2026-09-01T09:00"}]
+for e in data["/api/admin/planning"]["events"]:
+    grab(adm, f"/api/admin/planning/{e['id']}")
+state = adm.get("/api/admin/state").json()
+state["admin"].update(email="admin@example.com")
+data["/api/admin/state"] = {**state, "sso": None}
 data["/api/admin/settings"]["smtp_ready"] = False
 data["qr"] = pub.get("/api/donate/qr.svg").text
 

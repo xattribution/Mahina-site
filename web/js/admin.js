@@ -28,6 +28,9 @@ const ago = (s) => {
 };
 const aHref = (p) => href("/admin" + p);
 const aLink = (p, attrs, ...kids) => link("/admin" + p, attrs, ...kids);
+const can = (...perms) => ME?.role === "admin" || perms.some((p) => ME?.perms?.includes(p));
+const isAdmin = () => ME?.role === "admin";
+const money = (n) => (n == null || n === "" ? "" : "$" + Number(n).toFixed(2));
 const csv = (path) => (CFG.demo ? () => toast("Exports work on the live site") : () => { location.href = path; });
 async function refreshSite() { try { window.SITE = await api("/api/site"); } catch {} }
 
@@ -46,9 +49,11 @@ export async function render(path) {
   const main = h("main.admin-main", loading());
   clear(app).append(layout(section, main));
   window.scrollTo(0, 0);
-  const pages = { "": overview, events: id ? eventEditor : eventsList, signups: id ? sheetEditorPage : sheetsList, polls: id ? pollEditor : pollsList,
-    gallery: galleryAdmin, messages: inbox, people, email: emailPage, settings };
+  const pages = { "": overview, planning: id ? planPage : planningList, events: id ? eventEditor : eventsList, signups: id ? sheetEditorPage : sheetsList,
+    polls: id ? pollEditor : pollsList, gallery: galleryAdmin, messages: inbox, people, email: emailPage, team, activity, settings, account };
+  const navItem = NAV.find((n) => n[0] === section);
   try {
+    if (navItem && !navAllowed(navItem)) throw new Error("You don't have access to this part. Ask an admin.");
     const node = await (pages[section] || overview)(id, main);
     clear(main).append(node);
   } catch (e) {
@@ -60,7 +65,7 @@ export async function render(path) {
 async function refreshCounts() {
   try {
     const o = await api("/api/admin/overview");
-    COUNTS = { messages: o.unread, gallery: o.pending_photos, email: o.outbox_held };
+    COUNTS = { messages: o.unread, gallery: o.pending_photos, email: o.outbox_held, planning: o.my_tasks };
     $$(".side nav a").forEach((a) => {
       const n = COUNTS[a.dataset.sec];
       $(".count", a)?.remove();
@@ -69,9 +74,15 @@ async function refreshCounts() {
   } catch {}
 }
 
+// [path, label, icon, who can see it: null = everyone, "admin" = admins only, or a list of permissions]
+const NAV = [["", "Overview", "home", null], ["planning", "Planning", "clipboard", ["planning", "events"]], ["events", "Events", "calendar", ["events"]],
+  ["signups", "Sign-ups", "list", ["signups", "events"]], ["polls", "Polls", "poll", ["polls"]], ["gallery", "Gallery", "image", ["photos"]],
+  ["messages", "Messages", "inbox", ["messages"]], ["people", "People", "people", ["people"]], ["email", "Email", "mail", ["email"]],
+  ["team", "Team", "shield", "admin"], ["activity", "Activity", "history", "admin"], ["settings", "Settings", "gear", "admin"]];
+const navAllowed = ([, , , who]) => !who || (who === "admin" ? isAdmin() : can(...who));
+
 function layout(section, main) {
-  const nav = [["", "Overview", "home"], ["events", "Events", "calendar"], ["signups", "Sign-ups", "list"], ["polls", "Polls", "poll"],
-    ["gallery", "Gallery", "image"], ["messages", "Messages", "inbox"], ["people", "People", "people"], ["email", "Email", "mail"], ["settings", "Settings", "gear"]];
+  const nav = NAV.filter(navAllowed);
   const m = moonInfo();
   const mark = () => link("/admin", { class: "wordmark" }, moonSVG(m.phase, 22, { maria: false }), window.SITE?.club_name || "Mahina Club");
   const side = h("aside.side",
@@ -80,7 +91,7 @@ function layout(section, main) {
       icon(i), t, COUNTS[s] ? h("span.count", COUNTS[s]) : null))),
     h("div.side-foot",
       CFG.demo ? h("div.callout", { style: { margin: "0 0 8px", fontSize: "13px" } }, "Preview only. Edits here aren't saved.") : null,
-      h("div.side-who", h("b", ME.name), ME.email),
+      aLink("/account", { class: "side-who", "aria-current": section === "account" ? "page" : null }, h("b", ME.name), h("span", ME.email), h("span.role", isAdmin() ? "Admin" : "Member")),
       link("/", {}, icon("external"), "View site"),
       h("button", { type: "button", onclick: async () => { await api("/api/admin/logout", { method: "POST" }); go("/admin"); } }, icon("logout"), "Sign out")));
   const top = h("div.admin-top", mark(), h("button.icon-btn", { type: "button", "aria-label": "Menu", onclick: () => { side.classList.add("open"); $(".menu-close", side).style.display = "inline-grid"; } }, icon("menu", 24)));
@@ -105,7 +116,7 @@ function pwField(label, name, { autocomplete = "current-password", isNew = false
   return f;
 }
 
-const SSO_ERRORS = { notadmin: "That account isn't an admin here. Ask an admin to add your email.",
+const SSO_ERRORS = { notadmin: "That account isn't on the team here. Ask an admin to add your email.",
   noemail: "Your sign-in provider didn't share a verified email.", failed: "Single sign-on didn't finish. Try again." };
 
 function authScreen(app, mode) {
@@ -126,7 +137,7 @@ function authScreen(app, mode) {
   const sso = mode === "login" && STATE.sso ? h("a.btn.block", { class: pwOn ? "ghost" : "", href: "/api/admin/sso/start" }, `Sign in with ${STATE.sso.name}`) : null;
   clear(app).append(h("div.auth", h("div.auth-card",
     link("/", { class: "wordmark" }, moonSVG(m.phase, 22, { maria: false }), window.SITE?.club_name || "Mahina Club"),
-    h("h1", mode === "setup" ? "Create the first admin" : "Admin sign in"),
+    h("h1", mode === "setup" ? "Create the first admin" : "Sign in"),
     err && SSO_ERRORS[err] ? h("p.form-error", { style: { marginBottom: "14px" } }, SSO_ERRORS[err]) : null,
     sso, sso && form ? h("div.auth-or", "or") : null, form)));
   form?.querySelector("input").focus();
@@ -140,33 +151,42 @@ function head(title, { back, actions, sub } = {}) {
 
 // ---------- overview ----------
 async function overview() {
-  const [o, s] = await Promise.all([api("/api/admin/overview"), api("/api/admin/settings")]);
+  const withTasks = can("planning", "events");
+  const [o, plan] = await Promise.all([api("/api/admin/overview"), withTasks ? api("/api/admin/planning") : null]);
   const todos = [];
-  if (!o.smtp_ready) todos.push(["mail", "Connect an email service so confirmations and reminders go out", "/settings#email"]);
-  if (!s.venmo) todos.push(["heart", "Add the club Venmo handle to turn on the Give page", "/settings#give"]);
-  if (o.outbox_held) todos.push(["send", `${plural(o.outbox_held, "email")} waiting to send`, "/email"]);
+  if (o.smtp_ready === false) todos.push(["mail", "Connect an email service so confirmations and reminders go out", "/settings#email", "Set up"]);
+  if (o.venmo === false) todos.push(["heart", "Add the club Venmo handle to turn on the Give page", "/settings#give", "Set up"]);
+  if (o.outbox_held) todos.push(["send", `${plural(o.outbox_held, "email")} waiting to send`, "/email", "Review"]);
   const verb = { rsvp: "is going to", signup: "signed up for", poll: "answered" };
+  const stats = [
+    [can("events") ? "/events" : "/planning", o.upcoming.length, "Upcoming events"],
+    o.my_tasks != null ? ["/planning", o.my_tasks, "Assigned to you"] : null,
+    o.unread != null ? ["/messages", o.unread, "Unread messages"] : null,
+    o.pending_photos != null ? ["/gallery?show=pending", o.pending_photos, "Photos to review"] : null,
+    o.subscribers != null ? [can("people") ? "/people" : "/email", o.subscribers, "On the mailing list"] : null].filter(Boolean).slice(0, 4);
+  const mine = plan?.mine || [];
+  const showRecent = can("events", "signups", "polls");
   return h("div",
-    head(`Aloha, ${ME.name.split(" ")[0]}`, { actions: [aLink("/events/new", { class: "btn" }, icon("plus", 18), "New event"), aLink("/email", { class: "btn ghost" }, "Email people")] }),
-    todos.length ? h("div.todo", todos.map(([i, t, p]) => aLink(p, {}, icon(i), t, h("span.go", "Set up")))) : null,
-    h("div.stats",
-      aLink("/events", { class: "stat" }, h("b", o.upcoming.length), h("span", "Upcoming events")),
-      aLink("/messages", { class: "stat" }, h("b", o.unread), h("span", "Unread messages")),
-      aLink("/gallery?show=pending", { class: "stat" }, h("b", o.pending_photos), h("span", "Photos to review")),
-      aLink("/people", { class: "stat" }, h("b", o.subscribers), h("span", "On the mailing list"))),
+    head(`Aloha, ${ME.name.split(" ")[0]}`, { actions: [
+      can("events") ? aLink("/events/new", { class: "btn" }, icon("plus", 18), "New event") : null,
+      can("email") ? aLink("/email", { class: "btn ghost" }, "Email people") : null] }),
+    todos.length ? h("div.todo", todos.map(([i, t, p, go]) => aLink(p, {}, icon(i), t, h("span.go", go)))) : null,
+    h("div.stats", stats.map(([p, n, t]) => aLink(p, { class: "stat" }, h("b", n), h("span", t)))),
+    mine.length && showRecent ? h("section.a-section", h("h2", "Assigned to you", aLink("/planning", { class: "text-link small" }, "Planning")), myTaskList(mine)) : null,
     h("div.two-col",
-      h("section.a-section", h("h2", "Coming up", aLink("/events", { class: "text-link small" }, "All events")),
-        o.upcoming.length ? eventTable(o.upcoming) : empty("Nothing scheduled.", aLink("/events/new", { class: "btn dark" }, "New event"))),
-      h("section.a-section", h("h2", "Recent activity"),
-        o.recent.length ? h("div.activity", o.recent.map((r) => h("div", h("span", h("b", r.name), ` ${verb[r.kind]} `, r.what), h("time", ago(r.created))))) : h("p.muted", "No activity yet."))));
+      h("section.a-section", h("h2", "Coming up", aLink(can("events") ? "/events" : "/planning", { class: "text-link small" }, "All events")),
+        o.upcoming.length ? eventTable(o.upcoming) : empty("Nothing scheduled.", can("events") ? aLink("/events/new", { class: "btn dark" }, "New event") : null)),
+      showRecent ? h("section.a-section", h("h2", "Recent activity"),
+        o.recent.length ? h("div.activity", o.recent.map((r) => h("div", h("span", h("b", r.name), ` ${verb[r.kind]} `, r.what), h("time", ago(r.created))))) : h("p.muted", "No activity yet."))
+        : withTasks ? h("section.a-section", h("h2", "Assigned to you"), mine.length ? myTaskList(mine) : h("p.muted", "Nothing assigned to you right now.")) : null));
 }
 
 function eventTable(list) {
   return h("div.tbl-wrap", h("table.tbl",
     h("thead", h("tr", h("th", "Date"), h("th", "Event"), h("th", "Status"), h("th.num", "Going"), h("th.num", "Sign-ups"))),
-    h("tbody", list.map((e) => h("tr.click", { onclick: () => go(`/admin/events/${e.id}`) },
+    h("tbody", list.map((e) => h("tr.click", { onclick: () => go(`/admin/${can("events") ? "events" : "planning"}/${e.id}`) },
       h("td.date", dateCell(e.starts_at)),
-      h("td", h("a.strong", { href: aHref(`/events/${e.id}`), style: { textDecoration: "none" } }, e.title), h("div.sub", `${weekday(parse(e.starts_at))} ${e.all_day ? "" : time(parse(e.starts_at))}`)),
+      h("td", h("a.strong", { href: aHref(`/${can("events") ? "events" : "planning"}/${e.id}`), style: { textDecoration: "none" } }, e.title), h("div.sub", `${weekday(parse(e.starts_at))} ${e.all_day ? "" : time(parse(e.starts_at))}`)),
       h("td", pill(e.status)),
       h("td.num", e.going || "–"),
       h("td.num", e.signup ? `${e.signup.open} open` : "–"))))));
@@ -195,12 +215,13 @@ async function eventEditor(id) {
   const [ev, tags] = await Promise.all([isNew ? null : api(`/api/admin/events/${id}`), api("/api/admin/tags")]);
   const tab = query().get("tab") || "details";
   if (isNew) return h("div", head("New event", { back: ["/events", "Events"] }), eventForm(null, tags));
-  const tabs = [["details", "Details"], ["signups", "Sign-ups", ev.sheets.length], ["rsvps", "RSVPs", ev.rsvps.filter((r) => r.status === "going").length], ["invite", "Invite"]];
+  const tabs = [["details", "Details"], ["signups", "Sign-ups", ev.sheets.length], ["rsvps", "RSVPs", ev.rsvps.filter((r) => r.status === "going").length],
+    ["planning", "Planning"], can("email") ? ["invite", "Invite"] : null].filter(Boolean);
   const body = h("div");
   const setTab = (t) => {
     replaceUrl(`/admin/events/${id}?tab=${t}`);
     $$(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.t === t)));
-    clear(body).append(t === "signups" ? eventSheets(ev) : t === "rsvps" ? rsvpTab(ev) : t === "invite" ? inviteTab(ev) : eventForm(ev, tags));
+    clear(body).append(t === "signups" ? eventSheets(ev) : t === "rsvps" ? rsvpTab(ev) : t === "invite" ? inviteTab(ev) : t === "planning" ? planBoard(ev.id) : eventForm(ev, tags));
   };
   const page = h("div",
     head(ev.title, { back: ["/events", "Events"], sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`,
@@ -431,7 +452,7 @@ function rsvpTab(ev) {
   const draw = () => clear(wrap).append(
     h("div.a-head", h("div", h("h2.h3", `${total} going`), h("div.a-sub", `${plural(going.length, "RSVP")}, ${total - going.length} guests`)),
       h("div.row",
-        aLink(`/email?event=${ev.id}`, { class: "btn small ghost" }, icon("mail", 16), "Email attendees"),
+        can("email") ? aLink(`/email?event=${ev.id}`, { class: "btn small ghost" }, icon("mail", 16), "Email attendees") : null,
         h("button.btn.small.ghost", { type: "button", onclick: csv(`/api/admin/events/${ev.id}/export.csv`) }, icon("download", 16), "Roster CSV"))),
     ev.rsvps.length ? h("div.tbl-wrap", h("table.tbl",
       h("thead", h("tr", h("th", "Name"), h("th", "Email"), h("th", "Status"), h("th.num", "Guests"), h("th", "When"), h("th"))),
@@ -701,7 +722,13 @@ async function people() {
       h("td", h("label.switch", { style: { justifyContent: "flex-start" } }, h("input", { type: "checkbox", checked: !!p.active, "aria-label": `${p.email} on mailing list`, onchange: async (e) => {
         await api("/api/admin/people", { method: "PUT", body: { email: p.email, name: p.name, active: e.target.checked } }); p.active = e.target.checked ? 1 : 0;
         toast(e.target.checked ? "Added to the list" : "Removed from the list");
-      } }))))));
+      } }))),
+      h("td.actions", h("button.icon-btn", { type: "button", "aria-label": `Delete ${p.name || p.email}`, title: "Delete", onclick: async () => {
+        const who = p.name || p.email;
+        if (!(await confirmBox(`Delete ${who}? This erases their name and email from the mailing list, RSVPs, sign-ups, and messages. It can't be undone.`))) return;
+        await api("/api/admin/people/delete", { method: "POST", body: { email: p.email } });
+        list.splice(list.indexOf(p), 1); draw(); toast(`${who} deleted`);
+      } }, icon("trash", 16))))));
   };
   draw();
   const addForm = h("form.stack",
@@ -718,7 +745,8 @@ async function people() {
       h("button.btn.small.ghost", { type: "button", onclick: csv("/api/admin/people/export.csv") }, icon("download", 16), "CSV"),
       h("button.btn", { type: "button", onclick: () => (m = modal(h("div", h("h2", "Add people"), addForm), { label: "Add people" })) }, icon("plus", 18), "Add people")] }),
     h("input.search", { type: "search", placeholder: "Search", "aria-label": "Search people", style: { marginBottom: "16px" }, oninput: (e) => { q = e.target.value.toLowerCase(); draw(); } }),
-    h("div.tbl-wrap", h("table.tbl", h("thead", h("tr", h("th", "Person"), h("th.num", "RSVPs"), h("th.num", "Sign-ups"), h("th", "Mailing list", hint("People on the list get announcements and invites. Everyone still gets confirmations and reminders for what they join.")))), tbody)));
+    h("div.tbl-wrap", h("table.tbl", h("thead", h("tr", h("th", "Person"), h("th.num", "RSVPs"), h("th.num", "Sign-ups"), h("th", "Mailing list", hint("People on the list get announcements and invites. Everyone still gets confirmations and reminders for what they join.")),
+      h("th", h("span.visually-hidden", "Delete")))), tbody)));
 }
 
 // ---------- email ----------
@@ -791,7 +819,7 @@ async function emailPage() {
 
 // ---------- settings ----------
 async function settings() {
-  const [s, admins, events, polls] = await Promise.all([api("/api/admin/settings"), api("/api/admin/admins"), api("/api/admin/events"), api("/api/admin/polls")]);
+  const [s, events, polls] = await Promise.all([api("/api/admin/settings"), api("/api/admin/events"), api("/api/admin/polls")]);
   const save = async (patch, msg = "Saved") => { Object.assign(s, await api("/api/admin/settings", { method: "PUT", body: patch })); toast(msg); refreshSite(); };
   const sec = (id, title, body, hintText) => h("section.settings-sec", { id }, h("div", h("h2", title, hintText ? hint(hintText) : null)), body);
 
@@ -902,21 +930,6 @@ async function settings() {
       } }, "Send a test")));
   onSubmit(mail, (v) => save({ smtp: { host: v.host.trim(), port: Number(v.port) || 587, security: v.security, user: v.user.trim(), password: v.password, from: v.from.trim() } }, "Email settings saved"));
 
-  // admins
-  const adminList = h("div.list-edit", admins.map((a) => h("div.li", h("div", h("b", { style: { color: "var(--ink)" } }, a.name), h("div.muted.small", a.email)),
-    a.id === ME.id ? h("span.muted.small", "You") : h("button.btn.small.ghost", { type: "button", onclick: async () => { if (await confirmBox(`Remove ${a.name} as an admin?`, { ok: "Remove" })) { await api(`/api/admin/admins/${a.id}`, { method: "DELETE" }); go("/admin/settings", { replace: true }); } } }, "Remove"))));
-  const addAdmin = h("form.stack",
-    h("div.two", field("Name", input("name", { required: true })), field("Email", input("email", { type: "email", required: true }))),
-    STATE.password_login !== false ? pwField("Starting password", "password", { autocomplete: "new-password", isNew: true,
-      hintText: `At least ${STATE.min_password || 15} characters. Share it privately; they can change it after signing in.` })
-      : h("p.muted.small", { style: { margin: 0 } }, `They sign in with ${STATE.sso?.name || "single sign-on"} using this email.`),
-    h("p.form-error"), h("div", h("button.btn.ghost", { type: "submit" }, icon("plus", 16), "Add admin")));
-  onSubmit(addAdmin, async (v) => { await api("/api/admin/admins", { method: "POST", body: v }); toast("Admin added"); go("/admin/settings", { replace: true }); });
-  const pw = h("form.stack",
-    h("div.two", pwField("Current password", "current"), pwField("New password", "new", { autocomplete: "new-password", isNew: true })),
-    h("p.form-error"), h("div", h("button.btn.ghost", { type: "submit" }, "Change password")));
-  onSubmit(pw, async (v) => { await api("/api/admin/password", { method: "POST", body: v }); pw.reset(); toast("Password changed. Other devices are signed out."); });
-
   const page = h("div", head("Settings"),
     sec("club", "Club", club),
     sec("home", "Home page", home),
@@ -924,9 +937,302 @@ async function settings() {
     sec("officers", "Officers", officers, "Listed on the Contact page."),
     sec("gallery", "Gallery", gal),
     sec("email", "Email", mail),
-    sec("admins", "Admins", h("div.stack", adminList, addAdmin)),
-    STATE.password_login !== false ? sec("password", "Your password", pw) : null);
+    sec("team", "Team", h("p.muted", { style: { margin: 0 } }, "Admin and member accounts are under ", aLink("/team", {}, "Team"), ".")));
   const target = anchor();
   if (target) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: "smooth" }), 80);
   return page;
+}
+
+// ---------- planning (team only) ----------
+// Tasks and volunteer jobs, the shopping list, and notes for each event. Never shown on the public site.
+const dueCell = (s) => (s ? dateCell(s.length === 10 ? s + "T00:00" : s) : "");
+const overdue = (i) => i.due && !i.done && i.due.slice(0, 10) < isoLocal(clubNow()).slice(0, 10);
+
+function myTaskList(items, onChange) {
+  return h("div.plan-list", items.map((i) => h("div.plan-row", { class: i.done ? "done" : "" },
+    doneBox(i, async (done) => { await api(`/api/admin/planning/items/${i.id}`, { method: "PATCH", body: { done } }); i.done = done; toast(done ? (i.kind === "buy" ? "Marked bought" : "Done") : "Reopened"); onChange?.(); refreshCounts(); }),
+    h("div.plan-main", h("span.plan-title", i.kind === "buy" ? h("span.kind", icon("cart", 14)) : null, i.title, i.qty ? h("span.muted", ` ×${i.qty}`) : null),
+      h("div.sub", aLink(`/planning/${i.event_id}`, {}, i.event?.title || "Event"), i.due ? h("span", { class: overdue(i) ? "late" : "" }, ` · due ${dueCell(i.due)}`) : null)))));
+}
+
+function doneBox(i, onToggle) {
+  const label = i.kind === "buy" ? `Bought ${i.title}` : `Done: ${i.title}`;
+  return h("label.plan-check", { title: i.kind === "buy" ? "Bought" : "Done" },
+    h("input", { type: "checkbox", checked: !!i.done, "aria-label": label, onchange: async (e) => {
+      try { await onToggle(e.target.checked); } catch (err) { e.target.checked = !e.target.checked; toast(err.message, "error"); }
+    } }), h("span", icon("check", 14)));
+}
+
+async function planningList() {
+  const data = await api("/api/admin/planning");
+  const meter = (n, of) => h("span.meter", h("i", { style: { width: of ? `${Math.round((n / of) * 100)}%` : "0" } }));
+  const card = (e) => {
+    const t = e.totals, d = parse(e.starts_at);
+    return aLink(`/planning/${e.id}`, { class: "plan-card" },
+      h("div.when", h("span.d", d.getDate()), h("span.m", `${monthName(d, "short")} ${weekday(d)}`)),
+      h("div.plan-card-body",
+        h("h3", e.title, e.status === "draft" ? pill("draft") : null),
+        h("div.plan-stats",
+          h("span", icon("check", 16), t.tasks ? `${t.tasks_done}/${t.tasks} tasks` : "No tasks", t.tasks ? meter(t.tasks_done, t.tasks) : null),
+          h("span", icon("cart", 16), t.buy ? `${t.bought}/${t.buy} bought` : "No shopping", t.buy ? meter(t.bought, t.buy) : null),
+          t.estimate || t.spent ? h("span", `${money(t.spent)} spent`, t.estimate ? h("span.muted", ` of ${money(t.estimate)}`) : null) : null,
+          e.notes ? h("span", icon("note", 16), plural(e.notes, "note")) : null)));
+  };
+  const reload = () => go("/admin/planning", { replace: true });
+  return h("div", head("Planning"),
+    data.mine.length ? h("section.a-section", h("h2", "Assigned to you"), myTaskList(data.mine, reload)) : null,
+    h("section.a-section", h("h2", "Upcoming events"),
+      data.events.length ? h("div.plan-cards", data.events.map(card)) : empty("No upcoming events.", can("events") ? aLink("/events/new", { class: "btn dark" }, "New event") : null)));
+}
+
+async function planPage(id) {
+  const data = await api(`/api/admin/planning/${id}`);
+  const ev = data.event;
+  return h("div",
+    head(ev.title, { back: ["/planning", "Planning"], sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`, actions: [
+      link(`/events/${ev.slug}`, { class: "btn small ghost", target: "_blank" }, icon("external", 16), "View"),
+      can("events") ? aLink(`/events/${ev.id}`, { class: "btn small ghost" }, icon("edit", 16), "Edit event") : null] }),
+    planBoard(ev.id, data));
+}
+
+function planBoard(eid, first) {
+  const wrap = h("div.plan", loading());
+  let data = first;
+  const load = async () => { data = await api(`/api/admin/planning/${eid}`); draw(); };
+  const patch = async (i, body) => { Object.assign(i, await api(`/api/admin/planning/items/${i.id}`, { method: "PATCH", body })); data.totals = totals(); };
+  const totals = () => {
+    const buy = data.items.filter((i) => i.kind === "buy"), tasks = data.items.filter((i) => i.kind === "task");
+    return { tasks: tasks.length, tasks_done: tasks.filter((i) => i.done).length, buy: buy.length, bought: buy.filter((i) => i.done).length,
+      estimate: buy.reduce((a, i) => a + (i.est_cost || 0), 0), spent: buy.filter((i) => i.done).reduce((a, i) => a + (i.cost || 0), 0) };
+  };
+  const summary = h("div.plan-summary");
+  const drawSummary = () => {
+    const t = totals();
+    clear(summary).append(
+      h("div", h("b", `${t.tasks_done}/${t.tasks}`), h("span", "Tasks done")),
+      h("div", h("b", `${t.bought}/${t.buy}`), h("span", "Bought")),
+      h("div", h("b", money(t.estimate) || "$0.00"), h("span", "Estimated")),
+      h("div", h("b", money(t.spent) || "$0.00"), h("span", "Spent")),
+      data.event.going ? h("div", h("b", data.event.going), h("span", "Going")) : null);
+  };
+  const who = (i) => i.assignee ? h("span.who-chip", { class: i.assignee_id === ME.id ? "me" : "" }, i.assignee_id === ME.id ? "You" : i.assignee) : h("span.muted.small", "Unassigned");
+
+  function itemRow(i) {
+    const row = h("div.plan-row", { class: (i.done ? "done" : "") + (i.kind === "buy" ? " buy" : "") },
+      doneBox(i, async (done) => { await patch(i, { done }); draw(); }),
+      h("div.plan-main",
+        h("button.plan-title.linkish", { type: "button", onclick: () => editItem(i) }, i.title, i.qty ? h("span.muted", ` ×${i.qty}`) : null),
+        h("div.sub", who(i),
+          i.due ? h("span", { class: overdue(i) ? "late" : "" }, `Due ${dueCell(i.due)}`) : null,
+          i.done && i.done_by ? h("span", `${i.kind === "buy" ? "Bought" : "Done"} by ${i.done_by}`) : null,
+          i.details ? h("span.plan-details", i.details) : null)),
+      i.kind === "buy" ? h("div.plan-money",
+        h("span.muted.small", i.est_cost != null ? `est. ${money(i.est_cost)}` : ""),
+        h("input.money", { value: i.cost ?? "", inputmode: "decimal", placeholder: "Paid", "aria-label": `Amount paid for ${i.title}`,
+          onchange: async (e) => { try { await patch(i, { cost: e.target.value }); drawSummary(); toast("Saved"); } catch (err) { toast(err.message, "error"); e.target.value = i.cost ?? ""; } } })) : null,
+      h("button.icon-btn", { type: "button", "aria-label": `Edit ${i.title}`, onclick: () => editItem(i) }, icon("edit", 16)));
+    return row;
+  }
+
+  function assigneeSelect(cur = {}, name = "assignee") {
+    const other = h("input", { name: `${name}_name`, placeholder: "Name", "aria-label": "Someone else's name", value: cur.assignee_id ? "" : cur.assignee_name || "", hidden: !!cur.assignee_id || !cur.assignee_name });
+    const s = sel(name, [["", "Unassigned"], ...data.team.map((t) => [t.id, t.id === ME.id ? `${t.name} (you)` : t.name]), ["other", "Someone else…"]],
+      cur.assignee_id || (cur.assignee_name ? "other" : ""), { "aria-label": "Assigned to", onchange: (e) => { other.hidden = e.target.value !== "other"; if (!other.hidden) other.focus(); } });
+    return h("span.assignee", s, other);
+  }
+  const assigneeBody = (v, name = "assignee") => v[name] === "other" ? { assignee_id: null, assignee_name: v[`${name}_name`] || "" } : { assignee_id: v[name] ? Number(v[name]) : null, assignee_name: "" };
+
+  function addForm(kind) {
+    const f = h("form.plan-add",
+      h("input", { name: "title", required: true, placeholder: kind === "buy" ? "Add something to buy" : "Add a task or volunteer job", "aria-label": kind === "buy" ? "Item" : "Task" }),
+      kind === "buy" ? h("input.qty", { name: "qty", placeholder: "Qty", "aria-label": "Quantity" }) : null,
+      assigneeSelect(),
+      kind === "buy" ? h("input.money", { name: "est_cost", inputmode: "decimal", placeholder: "Est. $", "aria-label": "Estimated cost" })
+        : h("input", { name: "due", type: "date", "aria-label": "Due date" }),
+      h("button.btn.small", { type: "submit" }, icon("plus", 16), "Add"));
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const v = values(f);
+      if (!v.title?.trim()) return;
+      try {
+        const item = await api(`/api/admin/planning/${eid}/items`, { method: "POST", body: { kind, title: v.title, qty: v.qty, est_cost: v.est_cost, due: v.due, ...assigneeBody(v) } });
+        data.items.push(item); draw();
+        $(`.plan-sec[data-kind=${kind}] .plan-add input[name=title]`, wrap)?.focus();
+        if (item.assignee_id && item.assignee_id !== ME.id) toast(`Added. ${item.assignee} gets an email.`); 
+      } catch (err) { toast(err.message, "error"); }
+    });
+    return f;
+  }
+
+  function editItem(i) {
+    const form = h("form.stack",
+      field(i.kind === "buy" ? "Item" : "Task", input("title", { value: i.title, required: true })),
+      h("div.two", h("label.field", h("span.field-label", "Assigned to"), assigneeSelect(i)),
+        i.kind === "buy" ? field("Quantity", input("qty", { value: i.qty || "" }), { optional: true }) : field("Due", input("due", { type: "date", value: (i.due || "").slice(0, 10) }), { optional: true })),
+      i.kind === "buy" ? h("div.two", field("Estimated cost", input("est_cost", { value: i.est_cost ?? "", inputmode: "decimal" }), { optional: true }),
+        field("Amount paid", input("cost", { value: i.cost ?? "", inputmode: "decimal" }), { optional: true })) : null,
+      i.kind === "buy" ? field("Due", input("due", { type: "date", value: (i.due || "").slice(0, 10) }), { optional: true }) : null,
+      field("Notes", h("textarea", { name: "details", rows: 3 }, i.details || ""), { optional: true }),
+      h("label.check", h("input", { type: "checkbox", name: "done", checked: !!i.done }), i.kind === "buy" ? "Bought" : "Done"),
+      h("p.form-error"),
+      h("div.row.end",
+        h("button.btn.ghost", { type: "button", onclick: async () => {
+          if (!(await confirmBox(`Remove “${i.title}”?`, { ok: "Remove" }))) return;
+          await api(`/api/admin/planning/items/${i.id}`, { method: "DELETE" }); data.items.splice(data.items.indexOf(i), 1); m.close(); draw();
+        } }, "Remove"),
+        h("button.btn", { type: "submit" }, "Save")));
+    onSubmit(form, async (v) => {
+      await patch(i, { title: v.title, qty: v.qty ?? i.qty, due: v.due || null, est_cost: v.est_cost ?? i.est_cost, cost: v.cost ?? i.cost, details: v.details, done: !!v.done, ...assigneeBody(v) });
+      m.close(); draw(); toast("Saved");
+    });
+    const m = modal(h("div", h("h2", i.kind === "buy" ? "Shopping item" : "Task"), form), { label: "Edit item" });
+  }
+
+  function notes() {
+    const box = h("form.plan-note-form", h("textarea", { name: "body", rows: 3, placeholder: "Add a note for the team", "aria-label": "Note", required: true }),
+      h("div.row.end", h("button.btn.small", { type: "submit" }, "Post")));
+    box.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const ta = $("textarea", box);
+      if (!ta.value.trim()) return;
+      try { data.notes.unshift(await api(`/api/admin/planning/${eid}/notes`, { method: "POST", body: { body: ta.value } })); draw(); }
+      catch (err) { toast(err.message, "error"); }
+    });
+    return h("aside.plan-notes", h("h3", icon("note", 18), "Notes"), box,
+      data.notes.length ? data.notes.map((n) => h("div.plan-note",
+        h("div.plan-note-head", h("b", n.author_id === ME.id ? "You" : n.author), h("time", ago(n.created)),
+          n.author_id === ME.id || isAdmin() ? h("button.icon-btn", { type: "button", "aria-label": "Delete note", onclick: async () => {
+            if (!(await confirmBox("Delete this note?"))) return;
+            await api(`/api/admin/planning/notes/${n.id}`, { method: "DELETE" }); data.notes.splice(data.notes.indexOf(n), 1); draw();
+          } }, icon("close", 14)) : null),
+        h("p", n.body))) : h("p.muted.small", "No notes yet."));
+  }
+
+  function section(kind, title, iconName) {
+    const list = data.items.filter((i) => i.kind === kind).sort((a, b) => a.done - b.done);
+    const open = list.filter((i) => !i.done).length;
+    return h("section.plan-sec", { "data-kind": kind },
+      h("h3", icon(iconName, 18), title, h("span.muted", list.length ? `${open} open` : "")),
+      h("div.plan-list", list.length ? list.map(itemRow) : h("p.muted.small.plan-empty", kind === "buy" ? "Nothing on the list yet." : "No tasks yet.")),
+      addForm(kind));
+  }
+
+  function draw() {
+    drawSummary();
+    clear(wrap).append(summary, h("div.plan-grid", h("div", section("task", "Tasks and volunteers", "check"), section("buy", "Shopping list", "cart")), notes()));
+  }
+  if (data) draw(); else load().catch((e) => clear(wrap).append(h("p.form-error", e.message)));
+  return wrap;
+}
+
+// ---------- team (admins only) ----------
+const PERM_HELP = {
+  planning: "See event plans, take tasks, check off the shopping list, add notes.",
+  events: "Create and edit events, see RSVPs, and plan events.",
+  signups: "Build sign-up sheets and see who signed up.",
+  polls: "Create polls and see responses.",
+  photos: "Upload, review, and publish photos.",
+  messages: "Read the Contact inbox.",
+  people: "See the mailing list. Add and delete people.",
+  email: "Email the mailing list and event attendees.",
+};
+
+function accountForm(acct, perms, defaults, onDone) {
+  const isNew = !acct;
+  const st = { role: acct?.role || "member", perms: new Set(acct ? acct.perms : defaults) };
+  const roleBox = h("div");
+  const permBox = h("div.perm-list");
+  const drawRole = () => {
+    clear(roleBox).append(h("div.seg", { role: "group", "aria-label": "Role" }, [["member", "Member"], ["admin", "Admin"]].map(([v, t]) =>
+      h("button", { type: "button", "aria-pressed": String(st.role === v), disabled: acct?.id === ME.id, onclick: () => { st.role = v; drawRole(); } }, t))),
+      h("p.muted.small", { style: { margin: "8px 0 0" } }, st.role === "admin" ? "Admins can do everything, including settings, colors, the home page, team accounts, and the activity log." : "Members get only what you tick below. They can't change settings or the site's layout."));
+    permBox.hidden = st.role === "admin";
+  };
+  clear(permBox).append(Object.entries(perms).map(([k, name]) => h("label.perm", h("input", { type: "checkbox", checked: st.perms.has(k), onchange: (e) => e.target.checked ? st.perms.add(k) : st.perms.delete(k) }),
+    h("span", h("b", name), h("span.muted.small", PERM_HELP[k] || "")))));
+  drawRole();
+  const pwOn = STATE.password_login !== false;
+  const form = h("form.stack",
+    h("div.two", field("Name", input("name", { value: acct?.name || "", required: true })),
+      isNew ? field("Email", input("email", { type: "email", required: true })) : h("label.field", h("span.field-label", "Email"), h("div.muted", { style: { padding: "12px 0" } }, acct.email))),
+    h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Role"), roleBox),
+    h("div", permBox),
+    pwOn && (isNew || acct.id !== ME.id) ? pwField(isNew ? "Starting password" : "New password", "password", { autocomplete: "new-password", isNew: true,
+      hintText: `${isNew ? "" : "Optional. Signs them out everywhere. "}At least ${STATE.min_password || 15} characters. Share it privately; they can change it after signing in.` }) : null,
+    !pwOn && isNew ? h("p.muted.small", { style: { margin: 0 } }, `They sign in with ${STATE.sso?.name || "single sign-on"} using this email.`) : null,
+    h("p.form-error"),
+    h("div.row.end", h("button.btn", { type: "submit" }, isNew ? "Add" : "Save")));
+  const pw = form.querySelector("[name=password]");
+  if (pw && !isNew) pw.required = false;
+  onSubmit(form, async (v) => {
+    const body = { name: v.name, role: st.role, perms: [...st.perms] };
+    if (v.password) body.password = v.password;
+    if (isNew) await api("/api/admin/admins", { method: "POST", body: { ...body, email: v.email } });
+    else await api(`/api/admin/admins/${acct.id}`, { method: "PUT", body });
+    onDone();
+  });
+  return form;
+}
+
+async function team() {
+  const data = await api("/api/admin/admins");
+  const reload = () => go("/admin/team", { replace: true });
+  const open = (acct) => {
+    const m = modal(h("div", h("h2", acct ? acct.name : "Add someone"), accountForm(acct, data.perms, data.default_member_perms, () => { m.close(); toast(acct ? "Saved" : "Added"); reload(); })), { label: "Account", wide: true });
+  };
+  const access = (a) => a.role === "admin" ? h("span", "Everything") : a.perms.length ? h("span", a.perms.map((p) => data.perms[p]).join(", ")) : h("span.muted", "Nothing yet");
+  return h("div", head("Team", { actions: [h("button.btn", { type: "button", onclick: () => open(null) }, icon("plus", 18), "Add someone")] }),
+    h("div.tbl-wrap", h("table.tbl",
+      h("thead", h("tr", h("th", "Person"), h("th", "Role"), h("th", "Access"), h("th", "Last sign-in"), h("th"))),
+      h("tbody", data.accounts.map((a) => h("tr.click", { onclick: (e) => !e.target.closest("button") && open(a) },
+        h("td", h("span.strong", a.name, a.id === ME.id ? h("span.muted", " (you)") : null), h("div.sub", a.email)),
+        h("td", pill(a.role === "admin" ? "published" : "draft", a.role === "admin" ? "Admin" : "Member")),
+        h("td.sub", access(a)),
+        h("td.sub", a.last_login ? ago(a.last_login) : "Never"),
+        h("td.actions", a.id === ME.id ? null : h("button.icon-btn", { type: "button", "aria-label": `Remove ${a.name}`, onclick: async () => {
+          if (await confirmBox(`Remove ${a.name}'s account? They're signed out right away. Tasks assigned to them stay, with their name.`, { ok: "Remove" })) {
+            await api(`/api/admin/admins/${a.id}`, { method: "DELETE" }); toast("Removed"); reload();
+          }
+        } }, icon("trash", 16)))))))));
+}
+
+// ---------- activity log (admins only) ----------
+async function activity() {
+  const [first, accts] = await Promise.all([api("/api/admin/activity"), api("/api/admin/admins")]);
+  const st = { items: first.items, more: first.more, who: 0 };
+  const tbody = h("tbody");
+  const moreBox = h("div", { style: { marginTop: "16px" } });
+  const fetchPage = async (reset) => {
+    const before = reset ? 0 : st.items.at(-1)?.id || 0;
+    const r = await api(`/api/admin/activity?before=${before}&who=${st.who}`);
+    st.items = reset ? r.items : st.items.concat(r.items); st.more = r.more; draw();
+  };
+  const draw = () => {
+    clear(tbody).append(st.items.map((x) => h("tr",
+      h("td.sub", { title: x.at.replace("T", " ") }, `${dateCell(x.at)}, ${time(parse(x.at))}`),
+      h("td.strong", x.actor),
+      h("td", x.action, x.target ? h("span.muted", ` · ${x.target}`) : null))));
+    if (!st.items.length) tbody.append(h("tr", h("td", { colspan: 3 }, h("p.muted", "Nothing logged yet."))));
+    clear(moreBox).append(st.more ? h("button.btn.small.ghost", { type: "button", onclick: () => fetchPage(false) }, "Show older") : null);
+  };
+  draw();
+  const filter = sel("who", [["0", "Everyone"], ...accts.accounts.map((a) => [a.id, a.name])], "0", { "aria-label": "Filter by person", onchange: (e) => { st.who = Number(e.target.value); fetchPage(true); } });
+  return h("div", head("Activity", { actions: [filter] }),
+    h("div.tbl-wrap", h("table.tbl", h("thead", h("tr", h("th", "When"), h("th", "Who"), h("th", "What"))), tbody)), moreBox);
+}
+
+// ---------- your account ----------
+async function account() {
+  const pwOn = STATE.password_login !== false;
+  const pw = h("form.stack",
+    h("div.two", pwField("Current password", "current"), pwField("New password", "new", { autocomplete: "new-password", isNew: true })),
+    h("p.form-error"), h("div", h("button.btn", { type: "submit" }, "Change password")));
+  onSubmit(pw, async (v) => { await api("/api/admin/password", { method: "POST", body: v }); pw.reset(); toast("Password changed. Other devices are signed out."); });
+  const names = STATE.perm_names || {};
+  return h("div", head("Your account"),
+    h("section.settings-sec", h("div", h("h2", "You")), h("div.stack",
+      h("div", h("b", { style: { color: "var(--ink)" } }, ME.name), h("div.muted", ME.email)),
+      h("div.muted.small", isAdmin() ? "Admin. You can do everything." : `Member. Access: ${ME.perms.map((p) => names[p] || p).join(", ") || "none yet"}.`))),
+    pwOn ? h("section.settings-sec", h("div", h("h2", "Password")), pw)
+      : h("section.settings-sec", h("div", h("h2", "Password")), h("p.muted", `You sign in with ${STATE.sso?.name || "single sign-on"}.`)));
 }

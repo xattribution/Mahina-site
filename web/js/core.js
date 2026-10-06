@@ -69,7 +69,13 @@ const ICONS = {
   send: "M3.5 10 16.5 4l-4 12.5-3-5.5z", inbox: "M3.5 11.5h4l1 2h3l1-2h4M5 5h10l1.5 6.5V16h-13v-4.5z",
   eye: "M2.5 10S5 5 10 5s7.5 5 7.5 5-2.5 5-7.5 5-7.5-5-7.5-5zM10 12a2 2 0 1 0 0-4 2 2 0 0 0 0 4z",
   eyeOff: "M2.5 10S5 5 10 5s7.5 5 7.5 5-2.5 5-7.5 5-7.5-5-7.5-5zM10 12a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM3.5 3.5l13 13",
-  logout: "M8 4H4v12h4M11.5 6.5 15 10l-3.5 3.5M15 10H7.5", link: "M8.5 11.5l3-3M7 9.5l-1.8 1.8a2.5 2.5 0 0 0 3.5 3.5L10.5 13M13 10.5l1.8-1.8a2.5 2.5 0 0 0-3.5-3.5L9.5 7",
+  logout: "M8 4H4v12h4M11.5 6.5 15 10l-3.5 3.5M15 10H7.5",
+  clipboard: "M7 4.5H5.5v12h9v-12H13M7.5 3.5h5v2.5h-5zM7.5 11l1.8 1.8 3.4-3.6",
+  cart: "M2.5 4h2.2l1.7 8.5h8.4L16.8 7H5.6M8 16.3h.1M14 16.3h.1",
+  shield: "M10 3l6 2.2V10c0 3.5-2.6 6-6 7-3.4-1-6-3.5-6-7V5.2zM7.5 10l1.8 1.8 3.4-3.6",
+  history: "M3.5 10a6.5 6.5 0 1 0 2-4.7M3.5 4v3.5H7M10 6.5V10l2.5 1.5",
+  user: "M10 9.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM4 17c.6-3.2 3-5 6-5s5.4 1.8 6 5",
+  note: "M5 3.5h7.5l3 3v10h-10.5zM12 3.5v3.5h3.5M7.5 10.5h5M7.5 13.5h3.5", link: "M8.5 11.5l3-3M7 9.5l-1.8 1.8a2.5 2.5 0 0 0 3.5 3.5L10.5 13M13 10.5l1.8-1.8a2.5 2.5 0 0 0-3.5-3.5L9.5 7",
 };
 export function icon(name, size = 20) {
   const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -238,6 +244,7 @@ export function googleCal(ev) {
 export const me = {
   get() { try { return JSON.parse(localStorage.getItem("mahina.me") || "{}"); } catch { return {}; } },
   set(v) { try { localStorage.setItem("mahina.me", JSON.stringify({ ...me.get(), ...v })); } catch {} },
+  forget() { try { localStorage.removeItem("mahina.me"); } catch {} },
 };
 
 // ---------- UI bits ----------

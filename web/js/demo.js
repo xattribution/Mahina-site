@@ -163,6 +163,34 @@
       return wait({ ok: true });
     }
     if (path === "/api/admin/email/preview") return wait({ count: (body.audience?.type === "subscribers" ? 14 : 20) });
+    // planning works in memory so the board can be tried out
+    const board = (eid) => D[`/api/admin/planning/${eid}`];
+    const findItem = (id) => { for (const k of Object.keys(D)) if (k.startsWith("/api/admin/planning/") && D[k].items) { const i = D[k].items.find((x) => x.id === id); if (i) return [D[k], i]; } return []; };
+    const teamName = (id) => (D["/api/admin/team"] || []).find((t) => t.id === id)?.name || "";
+    const shape = (b, cur = {}) => {
+      const o = { ...cur, ...b };
+      for (const k of ["est_cost", "cost"]) if (k in b) o[k] = b[k] === "" || b[k] == null ? null : Number(String(b[k]).replace(/[$,]/g, ""));
+      if ("assignee_id" in b || "assignee_name" in b) o.assignee = o.assignee_id ? teamName(o.assignee_id) : o.assignee_name || "";
+      if ("done" in b) o.done_by = b.done ? D["/api/admin/state"].admin.name : "";
+      return o;
+    };
+    if ((m = path.match(/^\/api\/admin\/planning\/(\d+)\/items$/))) {
+      if (!(body.title || "").trim()) throw new DemoError("Write what needs doing.", 400, "title");
+      const item = shape(body, { id: Date.now(), event_id: Number(m[1]), kind: body.kind, done: false, details: "", qty: "", due: null, est_cost: null, cost: null, assignee_id: null, assignee_name: "" });
+      board(m[1])?.items.push(item);
+      return wait(clone(item));
+    }
+    if ((m = path.match(/^\/api\/admin\/planning\/items\/(\d+)$/))) {
+      const [b, item] = findItem(Number(m[1]));
+      if (!item) return wait({ ok: true });
+      if (method === "DELETE") { b.items.splice(b.items.indexOf(item), 1); return wait({ ok: true }); }
+      Object.assign(item, shape(body, item));
+      return wait(clone(item));
+    }
+    if ((m = path.match(/^\/api\/admin\/planning\/(\d+)\/notes$/))) {
+      const a = D["/api/admin/state"].admin;
+      return wait({ id: Date.now(), author_id: a.id, author: a.name, body: body.body, created: new Date().toISOString().slice(0, 19) });
+    }
     if (method === "PUT" || method === "DELETE" || path.endsWith("/bulk")) return wait({ ok: true, id: 0 });
     readOnly();
   }

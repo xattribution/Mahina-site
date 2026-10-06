@@ -36,16 +36,66 @@ def bootstrap_admin():
            (email, os.environ.get("ADMIN_NAME", "Admin"), auth.hash_password(pw) if pw else "", db.now_iso()))
 
 
-def current_admin(request: Request):
+# ---------- accounts, permissions, activity log ----------
+# Two kinds of account share one sign-in. Admins can do everything. Members get the areas an admin ticks for them,
+# and never site structure: settings, home page layout, colors, on-page editing, accounts, or the activity log.
+PERMS = {
+    "planning": "Event planning",
+    "events": "Events",
+    "signups": "Sign-ups",
+    "polls": "Polls",
+    "photos": "Gallery",
+    "messages": "Messages",
+    "people": "People",
+    "email": "Email",
+}
+DEFAULT_MEMBER_PERMS = ["planning"]
+
+
+def current_user(request: Request):
     s = auth.session_admin(request.cookies.get(COOKIE))
     if s:
         if request.method not in ("GET", "HEAD") and request.headers.get("x-mahina") != "1":
             raise Invalid("Blocked a cross-site request.", status=403)
+        s["ip"] = client_ip(request)
         return s
     raise Invalid("Sign in to continue.", status=401)
 
 
-Admin = Depends(current_admin)
+def allowed(user, *perms):
+    return user["role"] == "admin" or any(p in user["perms"] for p in perms)
+
+
+def can(*perms):
+    """Dependency: signed in, and an admin or a member with one of these permissions. can() alone means admins only."""
+    def check(request: Request):
+        u = current_user(request)
+        if not allowed(u, *perms):
+            raise Invalid("You don't have access to that. Ask an admin.", status=403)
+        return u
+    return Depends(check)
+
+
+Signed = Depends(current_user)
+AdminOnly = can()
+Admin = Signed  # kept for older imports
+
+
+def mask_email(email):
+    name, _, domain = (email or "").partition("@")
+    return f"{name[:1]}•••@{domain}" if domain else "•••"
+
+
+def audit(user, action, target="", ip=None):
+    """Record an action. Never store full emails or message text here; use names or masked emails."""
+    db.run("INSERT INTO audit_log(at, actor_id, actor, action, target, ip) VALUES (?,?,?,?,?,?)",
+           (db.now_iso(), user["id"] if user else None, user["name"] if user else "Someone",
+            action, clean(str(target or ""), 200), (user or {}).get("ip", "") if ip is None else ip))
+
+
+def title_of(table, rid, col="title"):
+    r = db.one(f"SELECT {col} FROM {table} WHERE id=?", (rid,))
+    return r[col] if r else f"#{rid}"
 
 
 def is_https(request: Request):
@@ -54,6 +104,9 @@ def is_https(request: Request):
 
 def start_session(response: Response, admin_id, request: Request):
     tok = auth.create_session(admin_id)
+    db.run("UPDATE admins SET last_login=? WHERE id=?", (db.now_iso(), admin_id))
+    a = db.one("SELECT id, name FROM admins WHERE id=?", (admin_id,))
+    audit({**a, "ip": client_ip(request)}, "Signed in")
     response.set_cookie(COOKIE, tok, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="strict",
                         secure=is_https(request), path="/")
 
@@ -66,7 +119,9 @@ def state(request: Request):
            "sso": {"name": oidc["name"]} if oidc else None, "min_password": auth.MIN_LEN}
     s = auth.session_admin(request.cookies.get(COOKIE))
     if s:
-        out["admin"] = {"id": s["id"], "email": s["email"], "name": s["name"]}
+        out["admin"] = {"id": s["id"], "email": s["email"], "name": s["name"], "role": s["role"],
+                        "perms": sorted(PERMS) if s["role"] == "admin" else sorted(p for p in s["perms"] if p in PERMS)}
+        out["perm_names"] = PERMS
     return out
 
 
@@ -76,9 +131,10 @@ def setup(request: Request, response: Response, body: dict = Body(...)):
         raise Invalid("Setup is already done. Sign in instead.", status=403)
     name, email = store.need_name(body.get("name")), store.need_email(body.get("email"))
     pw = auth.check_new_password(body.get("password") or "", email=email, name=name)
-    aid = db.run("INSERT INTO admins(email, name, pw_hash, created) VALUES (?,?,?,?)",
+    aid = db.run("INSERT INTO admins(email, name, pw_hash, role, created) VALUES (?,?,?,'admin',?)",
                  (email, name, auth.hash_password(pw), db.now_iso()))
     start_session(response, aid, request)
+    audit({"id": aid, "name": name, "ip": client_ip(request)}, "Set up the site")
     return {"ok": True}
 
 
@@ -92,6 +148,7 @@ def login(request: Request, response: Response, body: dict = Body(...)):
     ok, rehash = auth.verify_password(body.get("password") or "", a["pw_hash"] if a else None)
     if not ok:
         auth.record_failure(email, ip)
+        audit(None, "Failed sign-in", mask_email(email), ip=ip)
         raise Invalid("That email and password don't match.", status=401)
     auth.clear_failures(email)
     if rehash:
@@ -102,6 +159,9 @@ def login(request: Request, response: Response, body: dict = Body(...)):
 
 @router.post("/logout")
 def logout(request: Request, response: Response):
+    u = auth.session_admin(request.cookies.get(COOKIE))
+    if u:
+        audit({**u, "ip": client_ip(request)}, "Signed out")
     auth.end_session(request.cookies.get(COOKIE))
     response.delete_cookie(COOKIE, path="/")
     return {"ok": True}
@@ -156,54 +216,73 @@ async def sso_callback(request: Request):
 # ---------- overview ----------
 
 @router.get("/overview")
-def overview(a=Admin):
+def overview(a=Signed):
     now = db.now_iso()
+    out = {"role": a["role"]}
     upcoming = db.q("SELECT * FROM events WHERE starts_at > ? AND status!='draft' ORDER BY starts_at LIMIT 5", (now,))
-    return {
-        "upcoming": store.events_out(upcoming, admin=True),
-        "unread": db.one("SELECT COUNT(*) n FROM messages WHERE read=0 AND archived=0")["n"],
-        "pending_photos": db.one("SELECT COUNT(*) n FROM photos WHERE status='pending'")["n"],
-        "subscribers": db.one("SELECT COUNT(*) n FROM subscribers WHERE active=1")["n"],
-        "open_polls": db.one("SELECT COUNT(*) n FROM polls WHERE status='open'")["n"],
-        "outbox_held": db.one("SELECT COUNT(*) n FROM outbox WHERE status IN ('held','failed')")["n"],
-        "smtp_ready": mailer.smtp_config()["ready"],
-        "recent": db.q("""SELECT * FROM (SELECT 'rsvp' kind, r.name, e.title what, r.created FROM rsvps r JOIN events e ON e.id=r.event_id
-                          WHERE r.status='going'
-                          UNION ALL SELECT 'signup', sg.name, sh.title, sg.created FROM signups sg
-                          JOIN slots sl ON sl.id=sg.slot_id JOIN sheets sh ON sh.id=sl.sheet_id
-                          UNION ALL SELECT 'poll', COALESCE(NULLIF(rs.name,''),'Someone'), p.title, rs.created FROM responses rs
-                          JOIN polls p ON p.id=rs.poll_id)
-                          ORDER BY created DESC LIMIT 12"""),
-    }
+    out["upcoming"] = store.events_out(upcoming, admin=True)
+    if allowed(a, "messages"):
+        out["unread"] = db.one("SELECT COUNT(*) n FROM messages WHERE read=0 AND archived=0")["n"]
+    if allowed(a, "photos"):
+        out["pending_photos"] = db.one("SELECT COUNT(*) n FROM photos WHERE status='pending'")["n"]
+    if allowed(a, "people", "email"):
+        out["subscribers"] = db.one("SELECT COUNT(*) n FROM subscribers WHERE active=1")["n"]
+    if allowed(a, "email"):
+        out["outbox_held"] = db.one("SELECT COUNT(*) n FROM outbox WHERE status IN ('held','failed')")["n"]
+    if allowed(a, "polls"):
+        out["open_polls"] = db.one("SELECT COUNT(*) n FROM polls WHERE status='open'")["n"]
+    if a["role"] == "admin":
+        out["smtp_ready"] = mailer.smtp_config()["ready"]
+        out["venmo"] = bool(db.get_setting("venmo"))
+    # Recent activity shows names, so only to people who can already see those lists.
+    parts = []
+    if allowed(a, "events"):
+        parts.append("""SELECT 'rsvp' kind, r.name, e.title what, r.created FROM rsvps r JOIN events e ON e.id=r.event_id
+                        WHERE r.status='going'""")
+    if allowed(a, "signups", "events"):
+        parts.append("""SELECT 'signup', sg.name, sh.title, sg.created FROM signups sg
+                        JOIN slots sl ON sl.id=sg.slot_id JOIN sheets sh ON sh.id=sl.sheet_id""")
+    if allowed(a, "polls"):
+        parts.append("""SELECT 'poll', COALESCE(NULLIF(rs.name,''),'Someone'), p.title, rs.created FROM responses rs
+                        JOIN polls p ON p.id=rs.poll_id""")
+    out["recent"] = db.q(f"SELECT * FROM ({' UNION ALL '.join(parts)}) ORDER BY created DESC LIMIT 12") if parts else []
+    if allowed(a, "planning", "events"):
+        out["my_tasks"] = db.one("""SELECT COUNT(*) n FROM plan_items i JOIN events e ON e.id=i.event_id
+                                    WHERE i.assignee_id=? AND i.done=0 AND e.starts_at >= ?""",
+                                 (a["id"], (db.now_local() - timedelta(days=2)).isoformat()))["n"]
+    return out
 
 
 # ---------- tags ----------
 
 @router.get("/tags")
-def tags(a=Admin):
+def tags(a=Signed):
     return store.all_tags()
 
 
 @router.post("/tags")
-def tag_create(body: dict = Body(...), a=Admin):
+def tag_create(body: dict = Body(...), a=can("events", "photos")):
     name = clean(body.get("name"), 40)
     if not name:
         raise Invalid("Name the tag.", "name")
     tid = db.run("INSERT INTO tags(name, slug, color) VALUES (?,?,?)",
                  (name, db.slugify(name, "tags"), body.get("color") or "reef"))
+    audit(a, "Added tag", name)
     return db.one("SELECT * FROM tags WHERE id=?", (tid,))
 
 
 @router.put("/tags/{tid}")
-def tag_update(tid: int, body: dict = Body(...), a=Admin):
+def tag_update(tid: int, body: dict = Body(...), a=can("events", "photos")):
     name = clean(body.get("name"), 40)
     db.run("UPDATE tags SET name=?, slug=?, color=? WHERE id=?",
            (name, db.slugify(name, "tags", tid), body.get("color") or "reef", tid))
+    audit(a, "Changed tag", name)
     return {"ok": True}
 
 
 @router.delete("/tags/{tid}")
-def tag_delete(tid: int, a=Admin):
+def tag_delete(tid: int, a=can("events", "photos")):
+    audit(a, "Deleted tag", title_of("tags", tid, "name"))
     db.run("DELETE FROM tags WHERE id=?", (tid,))
     return {"ok": True}
 
@@ -237,12 +316,12 @@ def event_fields(body):
 
 
 @router.get("/events")
-def events(a=Admin):
+def events(a=Signed):
     return store.events_out(db.q("SELECT * FROM events ORDER BY starts_at DESC"), admin=True)
 
 
 @router.get("/events/{eid}")
-def event(eid: int, a=Admin):
+def event(eid: int, a=can("events")):
     ev = db.one("SELECT * FROM events WHERE id=?", (eid,))
     if not ev:
         raise Invalid("Event not found.", status=404)
@@ -253,18 +332,19 @@ def event(eid: int, a=Admin):
 
 
 @router.post("/events")
-def event_create(body: dict = Body(...), a=Admin):
+def event_create(body: dict = Body(...), a=can("events")):
     f = event_fields(body)
     f["slug"] = db.slugify(f["title"], "events")
     f["created"] = db.now_iso()
     cols = ",".join(f)
     eid = db.run(f"INSERT INTO events({cols}) VALUES ({','.join('?' * len(f))})", tuple(f.values()))
     store.set_tags("event_tags", "event_id", eid, body.get("tag_ids"))
+    audit(a, "Created event", f["title"])
     return {"id": eid}
 
 
 @router.put("/events/{eid}")
-def event_update(eid: int, body: dict = Body(...), a=Admin):
+def event_update(eid: int, body: dict = Body(...), a=can("events")):
     old = db.one("SELECT * FROM events WHERE id=?", (eid,))
     if not old:
         raise Invalid("Event not found.", status=404)
@@ -276,6 +356,8 @@ def event_update(eid: int, body: dict = Body(...), a=Admin):
     if body.get("notify_change") and (f["starts_at"] != old["starts_at"] or f["location"] != old["location"]
                                       or (f["status"] == "cancelled") != (old["status"] == "cancelled")):
         notify_attendees(eid, f["status"] == "cancelled")
+        audit(a, "Emailed attendees about a change", f["title"])
+    audit(a, "Edited event", f["title"])
     return {"id": eid, "slug": f["slug"]}
 
 
@@ -284,7 +366,7 @@ EVENT_PATCHABLE = ("title", "location", "description", "summary", "starts_at", "
 
 
 @router.patch("/events/{eid}")
-def event_patch(eid: int, body: dict = Body(...), a=Admin):
+def event_patch(eid: int, body: dict = Body(...), a=can("events")):
     """Change a few fields in place (used by on-page editing). Everything else stays as it is."""
     old = db.one("SELECT * FROM events WHERE id=?", (eid,))
     if not old:
@@ -295,6 +377,7 @@ def event_patch(eid: int, body: dict = Body(...), a=Admin):
     f = event_fields(merged)
     f["slug"] = old["slug"]
     db.run(f"UPDATE events SET {','.join(k + '=?' for k in f)} WHERE id=?", tuple(f.values()) + (eid,))
+    audit(a, "Edited event", f["title"])
     return store.events_out([db.one("SELECT * FROM events WHERE id=?", (eid,))])[0]
 
 
@@ -320,7 +403,7 @@ def notify_attendees(eid, cancelled):
 
 
 @router.post("/events/{eid}/duplicate")
-def event_duplicate(eid: int, a=Admin):
+def event_duplicate(eid: int, a=can("events")):
     ev = db.one("SELECT * FROM events WHERE id=?", (eid,))
     ev.pop("id")
     ev["title"] = ev["title"] + " (copy)"
@@ -336,33 +419,47 @@ def event_duplicate(eid: int, a=Admin):
         for sl in db.q("SELECT * FROM slots WHERE sheet_id=?", (s["id"],)):
             db.run("INSERT INTO slots(sheet_id, title, note, capacity, ask_item, sort) VALUES (?,?,?,?,?,?)",
                    (sid, sl["title"], sl["note"], sl["capacity"], sl["ask_item"], sl["sort"]))
+    audit(a, "Duplicated event", ev["title"])
     return {"id": new}
 
 
 @router.delete("/events/{eid}")
-def event_delete(eid: int, a=Admin):
+def event_delete(eid: int, a=can("events")):
+    audit(a, "Deleted event", title_of("events", eid))
     db.run("DELETE FROM events WHERE id=?", (eid,))
     return {"ok": True}
 
 
 @router.delete("/rsvps/{rid}")
-def rsvp_delete(rid: int, a=Admin):
+def rsvp_delete(rid: int, a=can("events")):
+    r = db.one("SELECT r.name, e.title FROM rsvps r JOIN events e ON e.id=r.event_id WHERE r.id=?", (rid,))
+    if r:
+        audit(a, "Removed an RSVP", f"{r['name']}, {r['title']}")
     db.run("DELETE FROM rsvps WHERE id=?", (rid,))
     return {"ok": True}
+
+
+def csv_cell(v):
+    # Spreadsheet apps run cells that start with these as formulas. A leading apostrophe keeps them as text.
+    v = "" if v is None else v
+    return "'" + v if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r") else v
 
 
 def csv_response(filename, header, rows):
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(header)
-    w.writerows(rows)
+    w.writerows([[csv_cell(c) for c in r] for r in rows])
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @router.get("/events/{eid}/export.csv")
-def event_export(eid: int, a=Admin):
-    ev = db.one("SELECT slug FROM events WHERE id=?", (eid,))
+def event_export(eid: int, a=can("events")):
+    ev = db.one("SELECT slug, title FROM events WHERE id=?", (eid,))
+    if not ev:
+        raise Invalid("Event not found.", status=404)
+    audit(a, "Downloaded roster", ev["title"])
     rows = [["RSVP", r["name"], r["email"], r["status"], r["guests"], "", "", r["created"]]
             for r in db.q("SELECT * FROM rsvps WHERE event_id=? ORDER BY created", (eid,))]
     rows += [["Sign-up", r["name"], r["email"], "", r["qty"], f"{r['sheet']}: {r['slot']}", r["item"], r["created"]]
@@ -374,13 +471,13 @@ def event_export(eid: int, a=Admin):
 # ---------- sign-up sheets ----------
 
 @router.get("/sheets")
-def sheets(a=Admin):
+def sheets(a=can("signups", "events")):
     return [store.sheet_out(s, admin=True) for s in db.q(
         "SELECT sh.* FROM sheets sh LEFT JOIN events e ON e.id=sh.event_id ORDER BY COALESCE(e.starts_at, sh.created) DESC")]
 
 
 @router.get("/sheets/{sid}")
-def sheet(sid: int, a=Admin):
+def sheet(sid: int, a=can("signups", "events")):
     s = db.one("SELECT * FROM sheets WHERE id=?", (sid,))
     if not s:
         raise Invalid("Sign-up not found.", status=404)
@@ -417,29 +514,32 @@ def sheet_fields(body):
 
 
 @router.post("/sheets")
-def sheet_create(body: dict = Body(...), a=Admin):
+def sheet_create(body: dict = Body(...), a=can("signups", "events")):
     sid = db.run("INSERT INTO sheets(event_id, title, description, status, closes_at, show_names, created) VALUES (?,?,?,?,?,?,?)",
                  sheet_fields(body) + (db.now_iso(),))
     save_slots(sid, body.get("slots"))
+    audit(a, "Created sign-up", clean(body.get("title"), 120))
     return {"id": sid}
 
 
 @router.put("/sheets/{sid}")
-def sheet_update(sid: int, body: dict = Body(...), a=Admin):
+def sheet_update(sid: int, body: dict = Body(...), a=can("signups", "events")):
     db.run("UPDATE sheets SET event_id=?, title=?, description=?, status=?, closes_at=?, show_names=? WHERE id=?",
            sheet_fields(body) + (sid,))
     save_slots(sid, body.get("slots"))
+    audit(a, "Edited sign-up", clean(body.get("title"), 120))
     return {"id": sid}
 
 
 @router.delete("/sheets/{sid}")
-def sheet_delete(sid: int, a=Admin):
+def sheet_delete(sid: int, a=can("signups", "events")):
+    audit(a, "Deleted sign-up", title_of("sheets", sid))
     db.run("DELETE FROM sheets WHERE id=?", (sid,))
     return {"ok": True}
 
 
 @router.patch("/sheets/{sid}")
-def sheet_patch(sid: int, body: dict = Body(...), a=Admin):
+def sheet_patch(sid: int, body: dict = Body(...), a=can("signups", "events")):
     s = db.one("SELECT * FROM sheets WHERE id=?", (sid,))
     if not s:
         raise Invalid("Sign-up not found.", status=404)
@@ -448,11 +548,12 @@ def sheet_patch(sid: int, body: dict = Body(...), a=Admin):
         raise Invalid("Give the sign-up a title.", "title")
     db.run("UPDATE sheets SET title=?, description=? WHERE id=?",
            (title, clean(body.get("description", s["description"]), 1000, multiline=True), sid))
+    audit(a, "Edited sign-up", title)
     return {"ok": True}
 
 
 @router.post("/sheets/{sid}/slots")
-def slot_add(sid: int, body: dict = Body(...), a=Admin):
+def slot_add(sid: int, body: dict = Body(...), a=can("signups", "events")):
     if not db.one("SELECT id FROM sheets WHERE id=?", (sid,)):
         raise Invalid("Sign-up not found.", status=404)
     title = clean(body.get("title"), 120)
@@ -462,11 +563,12 @@ def slot_add(sid: int, body: dict = Body(...), a=Admin):
     n = db.one("SELECT COALESCE(MAX(sort),0)+1 n FROM slots WHERE sheet_id=?", (sid,))["n"]
     new = db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, sort) VALUES (?,?,?,?,?)",
                  (sid, title, cap, 1 if body.get("ask_item") else 0, n))
+    audit(a, "Added sign-up slot", f"{title}, {title_of('sheets', sid)}")
     return {"id": new}
 
 
 @router.patch("/slots/{slot_id}")
-def slot_patch(slot_id: int, body: dict = Body(...), a=Admin):
+def slot_patch(slot_id: int, body: dict = Body(...), a=can("signups", "events")):
     sl = db.one("SELECT * FROM slots WHERE id=?", (slot_id,))
     if not sl:
         raise Invalid("Slot not found.", status=404)
@@ -482,30 +584,38 @@ def slot_patch(slot_id: int, body: dict = Body(...), a=Admin):
         cap = min(cap, 999)
     db.run("UPDATE slots SET title=?, note=?, capacity=? WHERE id=?",
            (title, clean(body.get("note", sl["note"]), 200), cap, slot_id))
+    audit(a, "Edited sign-up slot", title)
     return {"ok": True}
 
 
 @router.delete("/slots/{slot_id}")
-def slot_delete(slot_id: int, a=Admin):
+def slot_delete(slot_id: int, a=can("signups", "events")):
     if db.one("SELECT 1 FROM signups WHERE slot_id=? LIMIT 1", (slot_id,)):
         raise Invalid("People are signed up for this slot. Remove them first.")
+    audit(a, "Deleted sign-up slot", title_of("slots", slot_id))
     db.run("DELETE FROM slots WHERE id=?", (slot_id,))
     return {"ok": True}
 
 
 @router.delete("/signups/{uid}")
-def signup_delete(uid: int, a=Admin):
+def signup_delete(uid: int, a=can("signups", "events")):
+    r = db.one("SELECT sg.name, sl.title FROM signups sg JOIN slots sl ON sl.id=sg.slot_id WHERE sg.id=?", (uid,))
+    if r:
+        audit(a, "Removed a sign-up", f"{r['name']}, {r['title']}")
     db.run("DELETE FROM signups WHERE id=?", (uid,))
     return {"ok": True}
 
 
 @router.post("/slots/{slot_id}/signup")
-def signup_add(slot_id: int, body: dict = Body(...), a=Admin):
-    return store.signup(slot_id, body)
+def signup_add(slot_id: int, body: dict = Body(...), a=can("signups", "events")):
+    out = store.signup(slot_id, body)
+    audit(a, "Signed someone up", f"{store.need_name(body.get('name'))}, {title_of('slots', slot_id)}")
+    return out
 
 
 @router.get("/sheets/{sid}/export.csv")
-def sheet_export(sid: int, a=Admin):
+def sheet_export(sid: int, a=can("signups", "events")):
+    audit(a, "Downloaded sign-up list", title_of("sheets", sid))
     s = store.sheet_out(db.one("SELECT * FROM sheets WHERE id=?", (sid,)), admin=True)
     rows = [[sl["title"], u["name"], u["email"], u["phone"], u["qty"], u["item"], u["created"]]
             for sl in s["slots"] for u in sl["signups"]]
@@ -515,12 +625,12 @@ def sheet_export(sid: int, a=Admin):
 # ---------- polls ----------
 
 @router.get("/polls")
-def polls(a=Admin):
+def polls(a=can("polls")):
     return [store.poll_out(p, with_questions=False) for p in db.q("SELECT * FROM polls ORDER BY created DESC")]
 
 
 @router.get("/polls/{pid}")
-def poll(pid: int, a=Admin):
+def poll(pid: int, a=can("polls")):
     p = db.one("SELECT * FROM polls WHERE id=?", (pid,))
     if not p:
         raise Invalid("Poll not found.", status=404)
@@ -563,7 +673,7 @@ def poll_fields(body):
 
 
 @router.post("/polls")
-def poll_create(body: dict = Body(...), a=Admin):
+def poll_create(body: dict = Body(...), a=can("polls")):
     f = poll_fields(body)
     with db.tx():
         pid = db.run("INSERT INTO polls(title, intro, event_id, status, closes_at, results, collect_name, one_per_email, slug, created) "
@@ -573,19 +683,21 @@ def poll_create(body: dict = Body(...), a=Admin):
         except Invalid:
             db.run("DELETE FROM polls WHERE id=?", (pid,))
             raise
+    audit(a, "Created poll", f[0])
     return {"id": pid}
 
 
 @router.put("/polls/{pid}")
-def poll_update(pid: int, body: dict = Body(...), a=Admin):
+def poll_update(pid: int, body: dict = Body(...), a=can("polls")):
     save_questions(pid, body.get("questions"))
     db.run("UPDATE polls SET title=?, intro=?, event_id=?, status=?, closes_at=?, results=?, collect_name=?, one_per_email=? "
            "WHERE id=?", poll_fields(body) + (pid,))
+    audit(a, "Edited poll", clean(body.get("title"), 140))
     return {"id": pid}
 
 
 @router.patch("/polls/{pid}")
-def poll_patch(pid: int, body: dict = Body(...), a=Admin):
+def poll_patch(pid: int, body: dict = Body(...), a=can("polls")):
     p = db.one("SELECT * FROM polls WHERE id=?", (pid,))
     if not p:
         raise Invalid("Poll not found.", status=404)
@@ -593,18 +705,23 @@ def poll_patch(pid: int, body: dict = Body(...), a=Admin):
     if not title:
         raise Invalid("Give the poll a title.", "title")
     db.run("UPDATE polls SET title=?, intro=? WHERE id=?", (title, clean(body.get("intro", p["intro"]), 600), pid))
+    audit(a, "Edited poll", title)
     return {"ok": True}
 
 
 @router.delete("/polls/{pid}")
-def poll_delete(pid: int, a=Admin):
+def poll_delete(pid: int, a=can("polls")):
+    audit(a, "Deleted poll", title_of("polls", pid))
     db.run("DELETE FROM polls WHERE id=?", (pid,))
     return {"ok": True}
 
 
 @router.get("/polls/{pid}/export.csv")
-def poll_export(pid: int, a=Admin):
+def poll_export(pid: int, a=can("polls")):
     p = db.one("SELECT * FROM polls WHERE id=?", (pid,))
+    if not p:
+        raise Invalid("Poll not found.", status=404)
+    audit(a, "Downloaded poll responses", p["title"])
     qs = db.q("SELECT * FROM questions WHERE poll_id=? ORDER BY sort, id", (pid,))
     rows = []
     for r in db.q("SELECT * FROM responses WHERE poll_id=? ORDER BY created", (pid,)):
@@ -620,7 +737,7 @@ def poll_export(pid: int, a=Admin):
 # ---------- photos ----------
 
 @router.get("/photos")
-def photos(a=Admin):
+def photos(a=can("photos")):
     rows = db.q("SELECT * FROM photos WHERE status!='cover' ORDER BY status='approved', created DESC, id DESC")
     tags = store.tags_for("photo_tags", "photo_id", [r["id"] for r in rows])
     out = []
@@ -633,7 +750,7 @@ def photos(a=Admin):
 
 
 @router.post("/photos")
-async def photos_upload(event_id: str = Form(""), tag_ids: str = Form(""), files: list[UploadFile] = File(...), a=Admin):
+async def photos_upload(event_id: str = Form(""), tag_ids: str = Form(""), files: list[UploadFile] = File(...), a=can("photos")):
     ev = int(event_id) if event_id.isdigit() else None
     tids = [int(t) for t in tag_ids.split(",") if t.strip().isdigit()]
     if ev:
@@ -653,11 +770,13 @@ async def photos_upload(event_id: str = Form(""), tag_ids: str = Form(""), files
         for t in set(tids):
             db.run("INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?,?)", (pid, t))
         ids.append(pid)
+    if ids:
+        audit(a, f"Uploaded {len(ids)} photo{'s' if len(ids) != 1 else ''}", title_of("events", ev) if ev else "")
     return {"ids": ids, "errors": errors}
 
 
 @router.put("/photos/{pid}")
-def photo_update(pid: int, body: dict = Body(...), a=Admin):
+def photo_update(pid: int, body: dict = Body(...), a=can("photos")):
     p = db.one("SELECT * FROM photos WHERE id=?", (pid,))
     if not p:
         raise Invalid("Photo not found.", status=404)
@@ -666,11 +785,12 @@ def photo_update(pid: int, body: dict = Body(...), a=Admin):
             body.get("status") if body.get("status") in ("approved", "pending", "hidden") else p["status"], pid))
     if "tag_ids" in body:
         store.set_tags("photo_tags", "photo_id", pid, body["tag_ids"])
+    audit(a, "Edited a photo", f"#{pid}")
     return {"ok": True}
 
 
 @router.post("/photos/bulk")
-def photos_bulk(body: dict = Body(...), a=Admin):
+def photos_bulk(body: dict = Body(...), a=can("photos")):
     ids = [int(i) for i in body.get("ids") or []]
     action = body.get("action")
     for pid in ids:
@@ -686,32 +806,43 @@ def photos_bulk(body: dict = Body(...), a=Admin):
                 db.run("INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?,?)", (pid, int(t)))
         elif action == "event":
             db.run("UPDATE photos SET event_id=? WHERE id=?", (body.get("event_id") or None, pid))
+    verbs = {"delete": "Deleted", "approved": "Published", "hidden": "Hid", "tag": "Tagged", "event": "Moved"}
+    if ids and action in verbs:
+        audit(a, f"{verbs[action]} {len(ids)} photo{'s' if len(ids) != 1 else ''}")
     return {"ok": True}
 
 
 # ---------- messages & people ----------
 
 @router.get("/messages")
-def messages(a=Admin):
+def messages(a=can("messages")):
     return db.q("SELECT * FROM messages ORDER BY archived, created DESC")
 
 
 @router.put("/messages/{mid}")
-def message_update(mid: int, body: dict = Body(...), a=Admin):
+def message_update(mid: int, body: dict = Body(...), a=can("messages")):
     m = db.one("SELECT * FROM messages WHERE id=?", (mid,))
+    if not m:
+        raise Invalid("Message not found.", status=404)
+    archived = 1 if body.get("archived", m["archived"]) else 0
     db.run("UPDATE messages SET read=?, archived=? WHERE id=?",
-           (1 if body.get("read", m["read"]) else 0, 1 if body.get("archived", m["archived"]) else 0, mid))
+           (1 if body.get("read", m["read"]) else 0, archived, mid))
+    if archived != m["archived"]:
+        audit(a, "Archived a message" if archived else "Moved a message to the inbox", f"from {m['name']}")
     return {"ok": True}
 
 
 @router.delete("/messages/{mid}")
-def message_delete(mid: int, a=Admin):
+def message_delete(mid: int, a=can("messages")):
+    m = db.one("SELECT name FROM messages WHERE id=?", (mid,))
+    if m:
+        audit(a, "Deleted a message", f"from {m['name']}")
     db.run("DELETE FROM messages WHERE id=?", (mid,))
     return {"ok": True}
 
 
 @router.get("/people")
-def people(a=Admin):
+def people(a=can("people")):
     subs = {r["email"]: dict(r, events=0, signups=0) for r in db.q("SELECT * FROM subscribers ORDER BY created DESC")}
     for r in db.q("SELECT lower(email) email, MAX(name) name, COUNT(*) n, MIN(created) created FROM rsvps GROUP BY lower(email)"):
         p = subs.setdefault(r["email"], {"email": r["email"], "name": r["name"], "active": None, "created": r["created"],
@@ -727,7 +858,7 @@ def people(a=Admin):
 
 
 @router.post("/people")
-def people_add(body: dict = Body(...), a=Admin):
+def people_add(body: dict = Body(...), a=can("people")):
     added = 0
     for line in (body.get("emails") or "").replace(",", "\n").splitlines():
         line = line.strip()
@@ -741,21 +872,25 @@ def people_add(body: dict = Body(...), a=Admin):
             added += 1
         except Invalid:
             pass
+    if added:
+        audit(a, f"Added {added} {'person' if added == 1 else 'people'} to the mailing list")
     return {"added": added}
 
 
 @router.put("/people")
-def people_update(body: dict = Body(...), a=Admin):
+def people_update(body: dict = Body(...), a=can("people")):
     email = store.need_email(body.get("email"))
     if body.get("active"):
         store.subscribe(email, body.get("name", ""), "admin")
     else:
         db.run("UPDATE subscribers SET active=0 WHERE email=?", (email,))
+    audit(a, "Added to the mailing list" if body.get("active") else "Took off the mailing list", mask_email(email))
     return {"ok": True}
 
 
 @router.get("/people/export.csv")
-def people_export(a=Admin):
+def people_export(a=can("people")):
+    audit(a, "Downloaded the people list")
     rows = [[p.get("name", ""), p["email"], "yes" if p.get("active") else "no", p.get("events", 0), p.get("signups", 0)]
             for p in people(a)]
     return csv_response("mahina-club-people.csv", ["Name", "Email", "On mailing list", "RSVPs", "Sign-ups"], rows)
@@ -787,12 +922,12 @@ def audience(spec):
 
 
 @router.post("/email/preview")
-def email_preview(body: dict = Body(...), a=Admin):
+def email_preview(body: dict = Body(...), a=can("email")):
     return {"count": len(audience(body.get("audience") or {}))}
 
 
 @router.post("/email/send")
-def email_send(body: dict = Body(...), a=Admin):
+def email_send(body: dict = Body(...), a=can("email")):
     subject = clean(body.get("subject"), 160)
     text = clean(body.get("body"), 10000, multiline=True)
     if not subject:
@@ -817,11 +952,12 @@ def email_send(body: dict = Body(...), a=Admin):
             foot = ("Your sign-ups", f"{mailer.site_url()}/me/{p['manage']}")
         h, t = mailer.render(subject, blocks, button=button, footer_link=foot)
         mailer.queue(email, subject, h, t, mailer.ics_for([ev]) if ev else None, "invite" if ev else "announcement")
+    audit(a, f"Sent an email to {len(people)} {'person' if len(people) == 1 else 'people'}", subject)
     return {"queued": len(people), "smtp_ready": mailer.smtp_config()["ready"]}
 
 
 @router.post("/email/test")
-def email_test(a=Admin):
+def email_test(a=AdminOnly):
     h, t = mailer.render("Email is working", ["This test came from your Mahina Club site."])
     mailer.queue(a["email"], "Mahina Club test email", h, t, kind="test")
     cfg = mailer.smtp_config()
@@ -838,27 +974,29 @@ def email_test(a=Admin):
 
 
 @router.get("/outbox")
-def outbox(a=Admin):
+def outbox(a=can("email")):
     return db.q("SELECT id, to_email, subject, kind, status, error, created, sent_at FROM outbox ORDER BY id DESC LIMIT 300")
 
 
 @router.get("/outbox/{oid}")
-def outbox_item(oid: int, a=Admin):
+def outbox_item(oid: int, a=can("email")):
     return db.one("SELECT id, to_email, subject, html, status, error FROM outbox WHERE id=?", (oid,))
 
 
 @router.post("/outbox/retry")
-def outbox_retry(a=Admin):
+def outbox_retry(a=can("email")):
     if not mailer.smtp_config()["ready"]:
         raise Invalid("Set up email in Settings first.")
-    n = db.run("UPDATE outbox SET status='queued', error='' WHERE status IN ('held','failed')")
+    db.run("UPDATE outbox SET status='queued', error='' WHERE status IN ('held','failed')")
+    audit(a, "Sent waiting emails")
     mailer.flush()
     return {"ok": True}
 
 
 @router.post("/outbox/clear")
-def outbox_clear(a=Admin):
+def outbox_clear(a=can("email")):
     db.run("DELETE FROM outbox WHERE status IN ('held','failed')")
+    audit(a, "Discarded waiting emails")
     return {"ok": True}
 
 
@@ -945,7 +1083,7 @@ def sanitize_settings(b):
 
 
 @router.get("/settings")
-def settings(a=Admin):
+def settings(a=AdminOnly):
     s = db.all_settings()
     smtp = dict(s.get("smtp") or {})
     smtp["password"] = "••••••••" if smtp.get("password") else ""
@@ -954,7 +1092,7 @@ def settings(a=Admin):
 
 
 @router.put("/settings")
-def settings_update(body: dict = Body(...), a=Admin):
+def settings_update(body: dict = Body(...), a=AdminOnly):
     body = sanitize_settings(body)
     for k in PUBLIC_KEYS:
         if k in body:
@@ -965,11 +1103,16 @@ def settings_update(body: dict = Body(...), a=Admin):
         if new["password"] == "••••••••":
             new["password"] = cur.get("password", "")
         db.set_setting("smtp", new)
+    names = {"smtp": "email server", "home_sections": "home sections", "spotlight": "featured item", "donate_goal": "fundraising goal",
+             "donate_uses": "giving uses", "public_uploads": "photo sharing", "moon_caption": "moon name", "site_url": "site address"}
+    changed = [names.get(k, k.replace("_", " ")) for k in body if k in PUBLIC_KEYS or k == "smtp"]
+    if changed:
+        audit(a, "Changed settings", ", ".join(changed))
     return settings(a)
 
 
 @router.post("/settings/cover")
-async def upload_single(file: UploadFile = File(...), a=Admin):
+async def upload_single(file: UploadFile = File(...), a=can("events", "photos")):
     """Upload one image for an event cover without putting it in the gallery."""
     try:
         fn, th, w, h = media.save_image(await file.read())
@@ -980,35 +1123,100 @@ async def upload_single(file: UploadFile = File(...), a=Admin):
     return store.photo_out(db.one("SELECT * FROM photos WHERE id=?", (pid,)))
 
 
+# ---------- team accounts ----------
+
+def clean_perms(perms):
+    return sorted({p for p in (perms or []) if p in PERMS})
+
+
+def account_out(r):
+    out = {k: r[k] for k in ("id", "email", "name", "role", "created", "last_login")}
+    out["perms"] = sorted(PERMS) if r["role"] == "admin" else clean_perms(json.loads(r["perms"] or "[]"))
+    out["has_password"] = bool(r["pw_hash"])
+    return out
+
+
+def admin_count():
+    return db.one("SELECT COUNT(*) n FROM admins WHERE role='admin'")["n"]
+
+
 @router.get("/admins")
-def admins(a=Admin):
-    return db.q("SELECT id, email, name, created FROM admins ORDER BY created")
+def admins(a=AdminOnly):
+    rows = db.q("SELECT * FROM admins ORDER BY role='member', name COLLATE NOCASE")
+    return {"accounts": [account_out(r) for r in rows], "perms": PERMS, "default_member_perms": DEFAULT_MEMBER_PERMS}
+
+
+@router.get("/team")
+def team(a=Signed):
+    """Names of everyone with an account, for assigning planning tasks. No emails."""
+    return db.q("SELECT id, name FROM admins ORDER BY name COLLATE NOCASE")
 
 
 @router.post("/admins")
-def admin_create(body: dict = Body(...), a=Admin):
+def admin_create(body: dict = Body(...), a=AdminOnly):
     name, email = store.need_name(body.get("name")), store.need_email(body.get("email"))
     if db.one("SELECT id FROM admins WHERE email=?", (email,)):
-        raise Invalid("That person is already an admin.", "email")
+        raise Invalid("That person already has an account.", "email")
+    role = "member" if body.get("role") == "member" else "admin"
+    perms = clean_perms(body.get("perms") if "perms" in body else DEFAULT_MEMBER_PERMS) if role == "member" else []
     pw_hash = ""
     if auth.password_login_enabled():
         pw = auth.check_new_password(body.get("password") or "", email=email, name=name)
         pw_hash = auth.hash_password(pw)
-    db.run("INSERT INTO admins(email, name, pw_hash, created) VALUES (?,?,?,?)", (email, name, pw_hash, db.now_iso()))
+    db.run("INSERT INTO admins(email, name, pw_hash, role, perms, created) VALUES (?,?,?,?,?,?)",
+           (email, name, pw_hash, role, json.dumps(perms), db.now_iso()))
+    audit(a, f"Added {'an admin' if role == 'admin' else 'a member'}", name)
     return {"ok": True}
 
 
+@router.put("/admins/{aid}")
+def admin_update(aid: int, request: Request, body: dict = Body(...), a=AdminOnly):
+    row = db.one("SELECT * FROM admins WHERE id=?", (aid,))
+    if not row:
+        raise Invalid("Account not found.", status=404)
+    name = store.need_name(body.get("name", row["name"]))
+    role = body.get("role", row["role"])
+    role = "member" if role == "member" else "admin"
+    if role == "member" and row["role"] == "admin":
+        if aid == a["id"]:
+            raise Invalid("You can't remove your own admin access. Ask another admin.")
+        if admin_count() <= 1:
+            raise Invalid("Keep at least one admin.")
+    perms = clean_perms(body.get("perms", json.loads(row["perms"] or "[]"))) if role == "member" else []
+    new_hash = None
+    if body.get("password"):
+        if aid == a["id"]:
+            raise Invalid("Change your own password under Your account.")
+        new_hash = auth.hash_password(auth.check_new_password(body["password"], email=row["email"], name=name))
+    db.run("UPDATE admins SET name=?, role=?, perms=? WHERE id=?", (name, role, json.dumps(perms), aid))
+    if role != row["role"]:
+        audit(a, "Made an admin" if role == "admin" else "Changed to member", name)
+    elif role == "member":
+        audit(a, "Changed access", f"{name}: {', '.join(PERMS[p] for p in perms) or 'nothing'}")
+    if new_hash:
+        db.run("UPDATE admins SET pw_hash=? WHERE id=?", (new_hash, aid))
+        db.run("DELETE FROM sessions WHERE admin_id=?", (aid,))
+        audit(a, "Set a new password for", name)
+    return account_out(db.one("SELECT * FROM admins WHERE id=?", (aid,)))
+
+
 @router.delete("/admins/{aid}")
-def admin_delete(aid: int, a=Admin):
+def admin_delete(aid: int, a=AdminOnly):
+    row = db.one("SELECT * FROM admins WHERE id=?", (aid,))
+    if not row:
+        raise Invalid("Account not found.", status=404)
     if aid == a["id"]:
         raise Invalid("You can't remove yourself.")
+    if row["role"] == "admin" and admin_count() <= 1:
+        raise Invalid("Keep at least one admin.")
     db.run("DELETE FROM sessions WHERE admin_id=?", (aid,))
     db.run("DELETE FROM admins WHERE id=?", (aid,))
+    audit(a, "Removed an account", row["name"])
     return {"ok": True}
 
 
 @router.post("/password")
-def change_password(request: Request, body: dict = Body(...), a=Admin):
+def change_password(request: Request, body: dict = Body(...), a=Signed):
     row = db.one("SELECT * FROM admins WHERE id=?", (a["id"],))
     if row["pw_hash"]:
         ok, _ = auth.verify_password(body.get("current") or "", row["pw_hash"])
@@ -1017,4 +1225,214 @@ def change_password(request: Request, body: dict = Body(...), a=Admin):
     pw = auth.check_new_password(body.get("new") or "", email=row["email"], name=row["name"], field="new")
     db.run("UPDATE admins SET pw_hash=? WHERE id=?", (auth.hash_password(pw), a["id"]))
     auth.end_other_sessions(a["id"], request.cookies.get(COOKIE))
+    audit(a, "Changed their password")
+    return {"ok": True}
+
+
+# ---------- activity log ----------
+
+@router.get("/activity")
+def activity(before: int = 0, who: int = 0, a=AdminOnly):
+    where, args = [], []
+    if before:
+        where.append("id < ?")
+        args.append(before)
+    if who:
+        where.append("actor_id = ?")
+        args.append(who)
+    sql = "SELECT id, at, actor_id, actor, action, target, ip FROM audit_log"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    rows = db.q(sql + " ORDER BY id DESC LIMIT 100", tuple(args))
+    return {"items": rows, "more": len(rows) == 100}
+
+
+# ---------- people: removal ----------
+
+@router.post("/people/delete")
+def people_delete(body: dict = Body(...), a=can("people")):
+    """Erase a person: mailing list entry, RSVPs, sign-ups, messages, poll names, queued email. Not just unsubscribe."""
+    email = store.need_email(body.get("email"))
+    counts = store.forget(email)
+    if not any(counts.values()):
+        raise Invalid("No one with that email is on file.", status=404)
+    audit(a, "Deleted a person and their info", mask_email(email))
+    return counts
+
+
+# ---------- event planning (team only) ----------
+
+PLAN_KINDS = ("task", "buy")
+
+
+def money(v):
+    if v in (None, ""):
+        return None
+    try:
+        n = round(float(str(v).replace("$", "").replace(",", "")), 2)
+    except ValueError:
+        raise Invalid("Enter an amount like 24.50.")
+    if n < 0 or n > 1_000_000:
+        raise Invalid("Enter an amount like 24.50.")
+    return n
+
+
+def plan_item_out(r):
+    out = dict(r)
+    out["done"] = bool(r["done"])
+    out["assignee"] = r.get("assignee_now") or r["assignee_name"] or ""
+    out.pop("assignee_now", None)
+    return out
+
+
+ITEMS_SQL = """SELECT i.*, ad.name assignee_now FROM plan_items i LEFT JOIN admins ad ON ad.id=i.assignee_id"""
+
+
+def plan_event(eid):
+    ev = db.one("SELECT id, slug, title, starts_at, ends_at, all_day, location, status FROM events WHERE id=?", (eid,))
+    if not ev:
+        raise Invalid("Event not found.", status=404)
+    return ev
+
+
+def plan_totals(items):
+    buy = [i for i in items if i["kind"] == "buy"]
+    return {
+        "tasks": sum(1 for i in items if i["kind"] == "task"),
+        "tasks_done": sum(1 for i in items if i["kind"] == "task" and i["done"]),
+        "buy": len(buy), "bought": sum(1 for i in buy if i["done"]),
+        "estimate": round(sum((i["est_cost"] or 0) for i in buy), 2),
+        "spent": round(sum((i["cost"] or 0) for i in buy if i["done"]), 2),
+    }
+
+
+@router.get("/planning")
+def planning(a=can("planning", "events")):
+    since = (db.now_local() - timedelta(days=2)).isoformat()
+    evs = db.q("SELECT id, slug, title, starts_at, ends_at, all_day, location, status FROM events "
+               "WHERE starts_at >= ? AND status != 'cancelled' ORDER BY starts_at LIMIT 40", (since,))
+    items = db.q(ITEMS_SQL + " WHERE i.event_id IN (SELECT id FROM events WHERE starts_at >= ?)", (since,))
+    for e in evs:
+        e["totals"] = plan_totals([i for i in items if i["event_id"] == e["id"]])
+        e["notes"] = db.one("SELECT COUNT(*) n FROM plan_notes WHERE event_id=?", (e["id"],))["n"]
+    mine = db.q(ITEMS_SQL + """ JOIN events e ON e.id=i.event_id WHERE i.assignee_id=? AND i.done=0
+                AND e.starts_at >= ? ORDER BY e.starts_at, i.kind DESC, i.sort""", (a["id"], since))
+    titles = {e["id"]: e for e in evs}
+    return {"events": evs, "mine": [dict(plan_item_out(i), event=titles.get(i["event_id"])) for i in mine]}
+
+
+@router.get("/planning/{eid}")
+def plan_board(eid: int, a=can("planning", "events")):
+    ev = plan_event(eid)
+    items = [plan_item_out(i) for i in db.q(ITEMS_SQL + " WHERE i.event_id=? ORDER BY i.kind, i.done, i.sort, i.id", (eid,))]
+    notes = db.q("SELECT n.id, n.author_id, COALESCE(ad.name, n.author) author, n.body, n.created FROM plan_notes n "
+                 "LEFT JOIN admins ad ON ad.id=n.author_id WHERE n.event_id=? ORDER BY n.id DESC", (eid,))
+    going = db.one("SELECT COUNT(*) n, COALESCE(SUM(guests),0) g FROM rsvps WHERE event_id=? AND status='going'", (eid,))
+    ev["going"] = going["n"] + going["g"]
+    return {"event": ev, "items": items, "notes": notes, "totals": plan_totals(items), "team": team(a)}
+
+
+def plan_fields(body, old=None):
+    old = old or {}
+    get = lambda k, d=None: body[k] if k in body else old.get(k, d)
+    title = clean(get("title"), 160)
+    if not title:
+        raise Invalid("Write what needs doing.", "title")
+    aid = get("assignee_id")
+    aid = int(aid) if str(aid or "").isdigit() else None
+    if aid and not db.one("SELECT id FROM admins WHERE id=?", (aid,)):
+        aid = None
+    due = clean(get("due"), 16) or None
+    if due:
+        try:
+            datetime.fromisoformat(due)
+        except ValueError:
+            raise Invalid("Pick a due date.", "due")
+    return {"title": title, "details": clean(get("details", ""), 2000, multiline=True),
+            "assignee_id": aid, "assignee_name": "" if aid else clean(get("assignee_name", ""), 80),
+            "due": due, "qty": clean(get("qty", ""), 40),
+            "est_cost": money(get("est_cost")), "cost": money(get("cost"))}
+
+
+def notify_assignee(a, item, ev):
+    """Email someone when a teammate hands them a task. Not when they take it themselves."""
+    if not item["assignee_id"] or item["assignee_id"] == a["id"]:
+        return
+    who = db.one("SELECT name, email FROM admins WHERE id=?", (item["assignee_id"],))
+    if not who:
+        return
+    what = "Pick up" if item["kind"] == "buy" else "To do"
+    rows = [("Event", ev["title"]), ("When", mailer.fmt_when(ev)), (what, item["title"])]
+    if item.get("due"):
+        rows.append(("Due", item["due"].replace("T", " ")))
+    h, t = mailer.render(f"{a['name']} assigned you something", [("rows", rows)] + ([item["details"]] if item.get("details") else []),
+                         button=("Open the plan", f"{mailer.site_url()}/admin/planning/{ev['id']}"))
+    mailer.queue(who["email"], f"Assigned to you: {item['title']}", h, t, kind="assignment")
+
+
+@router.post("/planning/{eid}/items")
+def plan_add(eid: int, body: dict = Body(...), a=can("planning", "events")):
+    ev = plan_event(eid)
+    kind = body.get("kind") if body.get("kind") in PLAN_KINDS else "task"
+    f = plan_fields(body)
+    n = db.one("SELECT COALESCE(MAX(sort),0)+1 n FROM plan_items WHERE event_id=? AND kind=?", (eid, kind))["n"]
+    iid = db.run(f"INSERT INTO plan_items(event_id, kind, {','.join(f)}, sort, created_by, created) "
+                 f"VALUES (?,?,{','.join('?' * len(f))},?,?,?)", (eid, kind, *f.values(), n, a["name"], db.now_iso()))
+    item = plan_item_out(db.one(ITEMS_SQL + " WHERE i.id=?", (iid,)))
+    audit(a, "Added to the shopping list" if kind == "buy" else "Added a task", f"{f['title']}, {ev['title']}")
+    notify_assignee(a, item, ev)
+    return item
+
+
+@router.patch("/planning/items/{iid}")
+def plan_update(iid: int, body: dict = Body(...), a=can("planning", "events")):
+    old = db.one("SELECT * FROM plan_items WHERE id=?", (iid,))
+    if not old:
+        raise Invalid("That item is gone. Refresh the page.", status=404)
+    ev = plan_event(old["event_id"])
+    f = plan_fields(body, old)
+    if "done" in body and bool(body["done"]) != bool(old["done"]):
+        f.update(done=1 if body["done"] else 0, done_by=a["name"] if body["done"] else "",
+                 done_at=db.now_iso() if body["done"] else None)
+        verb = ("Bought" if old["kind"] == "buy" else "Finished") if body["done"] else "Reopened"
+        audit(a, verb, f"{f['title']}, {ev['title']}")
+    elif any(k in body for k in ("title", "assignee_id", "assignee_name", "due", "qty", "est_cost", "cost", "details")):
+        audit(a, "Updated", f"{f['title']}, {ev['title']}")
+    db.run(f"UPDATE plan_items SET {','.join(k + '=?' for k in f)} WHERE id=?", (*f.values(), iid))
+    item = plan_item_out(db.one(ITEMS_SQL + " WHERE i.id=?", (iid,)))
+    if f["assignee_id"] != old["assignee_id"]:
+        notify_assignee(a, item, ev)
+    return item
+
+
+@router.delete("/planning/items/{iid}")
+def plan_delete(iid: int, a=can("planning", "events")):
+    old = db.one("SELECT * FROM plan_items WHERE id=?", (iid,))
+    if old:
+        audit(a, "Removed", f"{old['title']}, {title_of('events', old['event_id'])}")
+        db.run("DELETE FROM plan_items WHERE id=?", (iid,))
+    return {"ok": True}
+
+
+@router.post("/planning/{eid}/notes")
+def plan_note(eid: int, body: dict = Body(...), a=can("planning", "events")):
+    ev = plan_event(eid)
+    text = clean(body.get("body"), 4000, multiline=True)
+    if not text:
+        raise Invalid("Write a note.", "body")
+    nid = db.run("INSERT INTO plan_notes(event_id, author_id, author, body, created) VALUES (?,?,?,?,?)",
+                 (eid, a["id"], a["name"], text, db.now_iso()))
+    audit(a, "Added a note", ev["title"])
+    return {"id": nid, "author_id": a["id"], "author": a["name"], "body": text, "created": db.now_iso()}
+
+
+@router.delete("/planning/notes/{nid}")
+def plan_note_delete(nid: int, a=can("planning", "events")):
+    n = db.one("SELECT * FROM plan_notes WHERE id=?", (nid,))
+    if not n:
+        return {"ok": True}
+    if n["author_id"] != a["id"] and a["role"] != "admin":
+        raise Invalid("Only the person who wrote a note, or an admin, can delete it.", status=403)
+    db.run("DELETE FROM plan_notes WHERE id=?", (nid,))
+    audit(a, "Deleted a note", title_of("events", n["event_id"]))
     return {"ok": True}

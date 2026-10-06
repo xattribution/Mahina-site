@@ -6,12 +6,13 @@ export const EDIT = { admin: null, on: false };
 const bindings = new WeakMap();
 const KEY = "mahina.editing";
 
-// Check whether an admin is signed in, and show or remove the edit bar to match.
+// Check whether an admin is signed in, and show or remove the edit bar to match. Members don't get it.
 // Runs at page load and whenever someone comes back to the site from the Admin console.
 export async function initEditing() {
   try {
     const st = await api("/api/admin/state");
-    EDIT.admin = st.admin;
+    // On-page editing changes site structure, so it's for admins only. Members work in the console.
+    EDIT.admin = st.admin && st.admin.role !== "member" ? st.admin : null;
   } catch { EDIT.admin = null; }
   if (!EDIT.admin) return signedOut();
   try { EDIT.on = sessionStorage.getItem(KEY) === "1"; } catch {}

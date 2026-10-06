@@ -252,6 +252,8 @@ def worker():
             try:
                 if tick % 3 == 0:
                     due_reminders()
+                if tick % 180 == 0:
+                    db.prune()
                 flush()
             except Exception as e:
                 print("mail worker:", e)

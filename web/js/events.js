@@ -207,6 +207,61 @@ function eventRow(e) {
     h("div", h("h3", e.title), h("div.sub", `${timeRange(e)}, ${e.location}`)));
 }
 
+// ---------- events list ----------
+// The full schedule, stacked vertically and grouped by month. Upcoming first, then earlier events newest first.
+function eventList(events) {
+  const now = clubNow();
+  const today = isoLocal(now).slice(0, 10);
+  const isPast = (e) => (e.ends_at || e.starts_at).slice(0, 10) < today;
+  const upcoming = events.filter((e) => !isPast(e)).sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+  const past = events.filter(isPast).sort((a, b) => b.starts_at.localeCompare(a.starts_at));
+  const group = (list) => {
+    const out = [];
+    let month = null;
+    for (const e of list) {
+      const d = parse(e.starts_at);
+      const m = d.getFullYear() * 12 + d.getMonth();
+      if (m !== month) {
+        month = m;
+        out.push(h("div.ev-month", h("span", monthName(d) + (d.getFullYear() !== now.getFullYear() ? " " + d.getFullYear() : ""))));
+      }
+      out.push(evRow(e, now, isPast(e)));
+    }
+    return out;
+  };
+  if (!upcoming.length && !past.length) return empty("Nothing on the calendar yet.");
+  return h("div.ev-list",
+    upcoming.length ? group(upcoming) : h("p.muted.ev-none", "Nothing scheduled yet. Check back soon."),
+    past.length ? h("h2.ev-earlier", "Earlier") : null,
+    past.length ? h("div.ev-past", group(past)) : null);
+}
+
+function evRow(ev, now, past) {
+  const d = parse(ev.starts_at);
+  const cancelled = ev.status === "cancelled";
+  const rel = relDays(d);
+  const actions = [];
+  if (!past && !cancelled) {
+    if (ev.signup?.open) actions.push(link(`/events/${ev.slug}#signups`, { class: "btn small" }, "Sign up"));
+    else if (ev.rsvp_enabled) actions.push(link(`/events/${ev.slug}#rsvp`, { class: "btn small" }, "RSVP"));
+  }
+  if (past && ev.photos) actions.push(link(`/gallery?event=${ev.slug}`, { class: "btn small dark" }, icon("camera", 16), plural(ev.photos, "photo")));
+  return h("article.ev-row", { class: `c-${tagColor(ev)}` + (past ? " past" : "") + (cancelled ? " cancelled" : "") },
+    h("div.ev-date", h("span.d", d.getDate()), h("span.w", weekday(d))),
+    h("span.ev-node", { "aria-hidden": "true" }),
+    h("div.ev-body",
+      h("div.ev-when", cancelled ? h("b", "Cancelled") : !past && rel ? h("b", rel) : null, h("span", timeRange(ev))),
+      link(`/events/${ev.slug}`, { class: "ev-title" }, ev.title),
+      ev.summary ? h("p.ev-sum", ev.summary) : null,
+      h("div.ev-meta",
+        ev.location ? h("span", icon("pin", 16), ev.location) : null,
+        ev.going ? h("span", icon("people", 16), `${ev.going} ${past ? "went" : "going"}`) : null,
+        !past && ev.signup ? h("span", icon("list", 16), ev.signup.open ? `${plural(ev.signup.open, "spot")} open` : "Sign-ups full") : null,
+        ev.tags.map((t) => h("span.tag", { class: `c-${t.color}` }, h("span.dot"), t.name))),
+      actions.length ? h("div.ev-actions", actions) : null),
+    ev.cover ? link(`/events/${ev.slug}`, { class: "ev-cover", tabindex: -1, "aria-hidden": "true" }, h("img", { src: media(ev.cover.thumb), alt: "", loading: "lazy" })) : h("span.ev-cover.none"));
+}
+
 // ---------- events page ----------
 export async function eventsPage() {
   setTitle("Events");
@@ -214,26 +269,19 @@ export async function eventsPage() {
   const from = new Date(now); from.setMonth(from.getMonth() - 3);
   const events = await api(`/api/events?start=${isoLocal(from).slice(0, 10)}`);
   const q = query();
-  const state = { view: q.get("view") === "calendar" ? "calendar" : "timeline", tag: q.get("tag") || "", y: now.getFullYear(), m: now.getMonth() };
+  const state = { view: q.get("view") === "calendar" ? "calendar" : "list", tag: q.get("tag") || "", y: now.getFullYear(), m: now.getMonth() };
   const usedTags = (window.SITE.tags || []).filter((t) => events.some((e) => e.tags.some((x) => x.id === t.id)));
-  const body = h("div");
+  const body = h("div.wrap");
   const controls = h("div.tl-controls");
   function rerender() {
     const list = state.tag ? events.filter((e) => e.tags.some((t) => t.slug === state.tag)) : events;
     const chips = h("div.tags", tagChip({ name: "All", slug: "", color: "night" }, { active: !state.tag, onclick: () => { state.tag = ""; rerender(); } }),
       usedTags.map((t) => tagChip(t, { active: state.tag === t.slug, onclick: () => { state.tag = state.tag === t.slug ? "" : t.slug; rerender(); } })));
     const seg = h("div.seg", { role: "group", "aria-label": "View" },
-      h("button", { type: "button", "aria-pressed": String(state.view === "timeline"), onclick: () => { state.view = "timeline"; rerender(); } }, "Timeline"),
-      h("button", { type: "button", "aria-pressed": String(state.view === "calendar"), onclick: () => { state.view = "calendar"; rerender(); } }, "Calendar"));
-    clear(body);
-    if (state.view === "timeline") {
-      const tl = timeline(list);
-      clear(controls).append(chips, h("div.row", seg, tl.arrows || null));
-      body.append(tl.el || tl);
-    } else {
-      clear(controls).append(chips, seg);
-      body.append(h("div.wrap", calendar(list, state, rerender)));
-    }
+      h("button", { type: "button", "aria-pressed": String(state.view === "list"), onclick: () => { state.view = "list"; rerender(); } }, icon("list", 16), "List"),
+      h("button", { type: "button", "aria-pressed": String(state.view === "calendar"), onclick: () => { state.view = "calendar"; rerender(); } }, icon("calendar", 16), "Calendar"));
+    clear(controls).append(chips, seg);
+    clear(body).append(state.view === "list" ? eventList(list) : calendar(list, state, rerender));
   }
   rerender();
   return h("div",

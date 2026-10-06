@@ -5,6 +5,7 @@ import re
 import secrets
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -100,6 +101,28 @@ CREATE TABLE IF NOT EXISTS outbox (
 CREATE TABLE IF NOT EXISTS reminders_sent (
   event_id INTEGER, hours INTEGER, email TEXT, PRIMARY KEY (event_id, hours, email));
 
+-- Internal event planning (team only): tasks and volunteer assignments, the shopping list, notes.
+CREATE TABLE IF NOT EXISTS plan_items (
+  id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL DEFAULT 'task', title TEXT NOT NULL, details TEXT DEFAULT '',
+  assignee_id INTEGER REFERENCES admins(id) ON DELETE SET NULL, assignee_name TEXT DEFAULT '',
+  due TEXT, qty TEXT DEFAULT '', est_cost REAL, cost REAL,
+  done INTEGER DEFAULT 0, done_by TEXT DEFAULT '', done_at TEXT,
+  sort INTEGER DEFAULT 0, created_by TEXT DEFAULT '', created TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS plan_notes (
+  id INTEGER PRIMARY KEY, event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  author_id INTEGER REFERENCES admins(id) ON DELETE SET NULL, author TEXT NOT NULL,
+  body TEXT NOT NULL, created TEXT NOT NULL);
+
+-- Who did what in the admin console.
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor_id INTEGER, actor TEXT NOT NULL,
+  action TEXT NOT NULL, target TEXT DEFAULT '', ip TEXT DEFAULT '');
+
+CREATE INDEX IF NOT EXISTS idx_plan_event ON plan_items(event_id, kind);
+CREATE INDEX IF NOT EXISTS idx_plan_assignee ON plan_items(assignee_id);
+CREATE INDEX IF NOT EXISTS idx_audit_at ON audit_log(at);
 CREATE INDEX IF NOT EXISTS idx_events_start ON events(starts_at);
 CREATE INDEX IF NOT EXISTS idx_signups_slot ON signups(slot_id);
 CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status);
@@ -154,6 +177,7 @@ def conn():
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA foreign_keys = ON")
         c.execute("PRAGMA journal_mode = WAL")
+        c.execute("PRAGMA secure_delete = ON")  # deleted personal data is overwritten, not left in free pages
         _local.conn = c
     return c
 
@@ -169,12 +193,75 @@ def tx():
         raise
 
 
+# Columns added after the first release. Each is added only if missing, so upgrades keep every row as it was.
+# Accounts that existed before roles keep full admin access (the column default).
+ADDED_COLUMNS = [
+    ("admins", "role", "TEXT NOT NULL DEFAULT 'admin'"),
+    ("admins", "perms", "TEXT NOT NULL DEFAULT '[]'"),
+    ("admins", "last_login", "TEXT"),
+]
+
+
+def _private_files():
+    """Keep the database and uploads readable only by the app's own user."""
+    for path, mode in [(DATA_DIR, 0o700), (UPLOAD_DIR, 0o700)]:
+        try:
+            os.chmod(path, mode)
+        except OSError:
+            pass
+    for name in os.listdir(DATA_DIR):
+        path = os.path.join(DATA_DIR, name)
+        # Upgrade safety copies hold personal data, so they don't outlive a month.
+        if name.startswith("mahina-before-upgrade-") and os.path.getmtime(path) < time.time() - 30 * 86400:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        if name.startswith("mahina.db") or name.endswith(".db"):
+            try:
+                os.chmod(os.path.join(DATA_DIR, name), 0o600)
+            except OSError:
+                pass
+
+
+def migrate(c):
+    missing = []
+    for table, col, decl in ADDED_COLUMNS:
+        if col not in {r[1] for r in c.execute(f"PRAGMA table_info({table})")}:
+            missing.append((table, col, decl))
+    if not missing:
+        return
+    # One-time safety copy before changing the shape of an existing database.
+    if c.execute("SELECT 1 FROM admins LIMIT 1").fetchone():
+        snap = os.path.join(DATA_DIR, f"mahina-before-upgrade-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db")
+        dest = sqlite3.connect(snap)
+        c.backup(dest)
+        dest.close()
+        os.chmod(snap, 0o600)
+    for table, col, decl in missing:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
 def init():
+    os.umask(0o077)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     c = conn()
     c.executescript(SCHEMA)
+    migrate(c)
     for k, v in DEFAULT_SETTINGS.items():
         c.execute("INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)", (k, json.dumps(v)))
+    c.commit()
+    _private_files()
+
+
+def prune():
+    """Housekeeping: sent email copies go after 90 days, the activity log after 400."""
+    c = conn()
+    now = now_local()
+    from datetime import timedelta
+    c.execute("DELETE FROM outbox WHERE status='sent' AND created < ?", ((now - timedelta(days=90)).isoformat(),))
+    c.execute("DELETE FROM audit_log WHERE at < ?", ((now - timedelta(days=400)).isoformat(),))
     c.commit()
 
 

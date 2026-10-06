@@ -7,14 +7,16 @@ Website and admin console for the Mahina Club, the Space Forces–Indo-Pacific b
 | Area | Visitors | Admins |
 |---|---|---|
 | Home | Tonight's moon and its Hawaiian night name, the featured event or poll, a live timeline, photos, polls, fundraising goal | Pick what's featured; show, hide, and reorder sections; set the top banner; edit text in place |
-| Events | Hover-to-expand timeline with full-moon markers, month calendar, tag filters, RSVP with guests, add to Google/Apple/Outlook | Create, duplicate, draft, cancel; capacity; reminder schedule; notify attendees of changes; roster CSV |
+| Events | Hover-to-expand timeline on the home page; full list and month calendar on the Events page, tag filters, RSVP with guests, add to Google/Apple/Outlook | Create, duplicate, draft, cancel; capacity; reminder schedule; notify attendees of changes; roster CSV |
 | Sign-ups | SignUpGenius-style slots: potluck dishes ("what are you bringing?"), timed volunteer shifts, quantities | Templates (potluck, shifts, blank), reorder slots, remove people, CSV |
 | Gallery | Masonry, lightbox, filter by tag or event; tag filters surface related events; visitors can share photos | Bulk upload, review queue, bulk tag/hide/delete, captions |
 | Polls | Forms-style questions: multiple choice, checkboxes, 1–5 rating, written | Builder, open/close dates, result visibility, one response per email, CSV |
 | Give | Venmo handle, QR code, goal progress, where the money goes | Edit handle, goal, amount raised |
+| Planning | | Per-event tasks and volunteer jobs assigned to team members, a shopping list with costs and who bought what, and team notes. Never public |
 | Contact | Message form, officers, club email | Inbox with read/archive |
-| My sign-ups | Every confirmation email links to a page where people change or cancel | |
-| Email | Confirmations with calendar files, reminders, invites, announcements, unsubscribe links | Composer (mailing list, everyone, event attendees, specific people), outbox |
+| My sign-ups | Every confirmation email links to a page where people change or cancel, or remove themselves completely | |
+| Email | Confirmations with calendar files, reminders, invites, announcements, unsubscribe and remove-me links | Composer (mailing list, everyone, event attendees, specific people), outbox |
+| Team | | Admin and member accounts, per-area access for members, and an activity log of who did what |
 
 ## Install
 
@@ -34,7 +36,7 @@ It installs Docker if needed and asks three questions: the port, the public addr
 | Restore a backup | `sudo mahina restore <file>` |
 | Status, logs, restart | `sudo mahina status`, `sudo mahina logs`, `sudo mahina restart` |
 
-- **Update** backs up your data first, downloads the latest version, and restarts. If the new version fails to start, it goes back to the previous one on its own. The last 10 backups are kept in `/opt/mahina-club/backups`.
+- **Update** never touches your data: the mailing list, sign-ups, email settings, and accounts carry over. It backs up your data first, downloads the latest version, and restarts. If the new version fails to start, it goes back to the previous one on its own. The last 10 backups are kept in `/opt/mahina-club/backups`.
 - **Uninstall** asks you to type `uninstall`, saves a final backup to your home folder, and removes the site. Docker stays installed. Add `--purge` to skip the backup, or `--yes` to skip the question.
 - **Settings** are in `/opt/mahina-club/.env`. Run `sudo mahina restart` after changing them. New settings from updates are added automatically, and your values are kept.
 
@@ -59,7 +61,18 @@ The color swatches in the edit bar switch the whole site between two themes:
 
 You can also choose a theme under **Admin > Settings > Colors**, and override the button color there. Emails follow the theme too. Every theme color is a CSS variable at the top of `web/css/site.css` (classic) and in the `[data-palette="ocean"]` block, so adding another theme means adding one more block and one entry in `PALETTES` in `app/db.py`.
 
-Everything else is under **Admin**.
+Everything else is under **Admin**. Only admins see the edit button; members work in the admin console.
+
+## Team accounts
+
+Everyone signs in at `/admin`. There are two kinds of account, managed under **Admin > Team**:
+
+- **Admins** can do everything.
+- **Members** get only the areas an admin ticks: Event planning, Events, Sign-ups, Polls, Gallery, Messages, People, and Email. Members can never change settings, colors, the home page layout, the banner, team accounts, or edit pages in place.
+
+New members start with Event planning. In **Planning**, anyone with access sees each upcoming event's tasks, shopping list, and notes. They can take or assign work, check items off, and record what was spent. A person assigned something by someone else gets an email with a link to the plan.
+
+**Admin > Activity** lists sign-ins, failed sign-ins, and every change, by who and when. It keeps 400 days. Entries name people, not their full email addresses.
 
 ## Admin sign-in
 
@@ -69,7 +82,7 @@ Everything else is under **Admin**.
 
 1. Create an OIDC client in the provider with the redirect URI `https://<your site>/api/admin/sso/callback`.
 2. Set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and `OIDC_NAME` in `.env`.
-3. Add each admin's email under **Settings > Admins**. Only listed emails get in.
+3. Add each person's email under **Team**. Only listed emails get in.
 4. Once it works, set `PASSWORD_LOGIN=0` to turn passwords off.
 
 ## Security
@@ -82,6 +95,9 @@ Everything else is under **Admin**.
 - **Photos:** every upload is decoded and re-saved as a fresh JPEG with metadata stripped. Oversized images are refused, so a crafted file can't pass through.
 - **Admin sessions:** session cookies are HttpOnly and SameSite=Strict, and only a hash of each session token is stored. Every admin write needs a custom header, which blocks cross-site requests.
 - **Change-or-cancel links:** they go only to the person's own inbox and are never shown on screen. If someone RSVPs again with an email that's already on the list, the original RSVP stays as it is and the owner gets their link again.
+- **Permissions:** every console request is checked on the server against the account's role and access, not just hidden in the menu. Names and emails only reach people with access to that area. The public site shows first names and last initials on sign-up sheets, and never shows emails.
+- **Removing people:** under **People**, the trash button deletes a person outright: mailing list entry, RSVPs, sign-ups, messages, queued emails, and their name on poll answers and shared photos. Anyone can do the same for themselves from the **Remove me** button on the unsubscribe page or their sign-ups page. Deleted rows are overwritten in the database file, not just unlinked.
+- **Stored data:** the database, uploads, and backups are readable only by the site's own user. Copies of sent emails are cleared after 90 days. CSV downloads are escaped so a name can't run as a spreadsheet formula.
 - **Spam:** public forms have a hidden honeypot field and per-address rate limits. Set `FORWARDED_ALLOW_IPS` to your proxy so the limits see real visitor addresses.
 
 ## Email

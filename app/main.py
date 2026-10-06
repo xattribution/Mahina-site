@@ -370,15 +370,56 @@ def subscribe(request: Request, body: dict = Body(...)):
     return {"ok": True}
 
 
+def plain_page(title, body):
+    """A tiny standalone page for links that open from email."""
+    pal = db.palette_colors()
+    return HTMLResponse(f"""<!doctype html><html lang=en><meta charset=utf-8><meta name=viewport content="width=device-width">
+<title>{title}</title><meta name=robots content=noindex>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:520px;margin:14vh auto;padding:0 20px;
+color:{pal['text']};line-height:1.55">{body}<p style="margin-top:32px"><a href="/" style="color:{pal['ink']}">Back to the site</a></p>""",
+                        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+def _btn(pal):
+    return (f"font:inherit;font-weight:650;padding:12px 20px;border-radius:999px;border:0;cursor:pointer;"
+            f"background:{pal['accent']};color:#fff")
+
+
 @app.get("/unsubscribe/{tok}", response_class=HTMLResponse)
 def unsubscribe(tok: str):
     r = db.one("SELECT * FROM subscribers WHERE token=?", (tok,))
+    if not r:
+        return plain_page("Not found", "<h1 style='letter-spacing:-.02em'>This link no longer works.</h1>"
+                          "<p>You may have already removed yourself. You won't get club emails.</p>")
+    db.run("UPDATE subscribers SET active=0 WHERE id=?", (r["id"],))
+    pal = db.palette_colors()
+    return plain_page("Unsubscribed", f"""<h1 style="letter-spacing:-.02em;color:{pal['ink']}">You're off the list.</h1>
+<p>You won't get club emails anymore. Sign-up confirmations and reminders for things you join still arrive.</p>
+<form method=post action="/unsubscribe/{tok}/remove" style="margin-top:36px;padding-top:24px;border-top:1px solid #ddd">
+<p style="margin:0 0 14px"><b style="color:{pal['ink']}">Remove me completely</b><br>Deletes your name and email from the club's
+records: the mailing list, RSVPs, sign-ups, and messages you sent.</p>
+<button style="{_btn(pal)}">Remove me</button></form>""")
+
+
+@app.post("/unsubscribe/{tok}/remove", response_class=HTMLResponse)
+def unsubscribe_remove(tok: str, request: Request):
+    throttle(request, "forget", 10)
+    r = db.one("SELECT email FROM subscribers WHERE token=?", (tok,))
     if r:
-        db.run("UPDATE subscribers SET active=0 WHERE id=?", (r["id"],))
-    return HTMLResponse(f"""<!doctype html><meta name=viewport content="width=device-width"><title>Unsubscribed</title>
-<body style="font-family:-apple-system,Segoe UI,sans-serif;max-width:520px;margin:15vh auto;padding:0 20px;color:#0F2340">
-<h1 style="letter-spacing:-.02em">You're off the list.</h1><p>You won't get club emails anymore.
-Sign-up confirmations and reminders for things you join still arrive.</p><p><a href="/" style="color:#C8233B">Back to the site</a></p>""")
+        store.forget(r["email"])
+        from .admin import audit
+        audit(None, "A person removed themselves with their email link", ip="")
+    return plain_page("Removed", "<h1 style='letter-spacing:-.02em'>You're removed.</h1>"
+                      "<p>Your name and email are deleted from the club's records.</p>")
+
+
+@app.post("/api/me/{tok}/remove")
+def me_remove(tok: str, request: Request):
+    throttle(request, "forget", 10)
+    store.forget(email_for_token(tok))
+    from .admin import audit
+    audit(None, "A person removed themselves with their sign-up link", ip="")
+    return {"ok": True}
 
 
 @app.get("/api/donate/qr.svg")

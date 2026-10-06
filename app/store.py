@@ -274,6 +274,23 @@ def subscribe(email, name="", source=""):
     return tok
 
 
+def forget(email):
+    """Delete everything stored about one email address. Poll answers stay in the totals with the name removed."""
+    email = email.lower()
+    out = {}
+    with db.tx() as c:
+        run = lambda sql: c.execute(sql, (email,)).rowcount
+        out["mailing_list"] = run("DELETE FROM subscribers WHERE lower(email)=?")
+        out["rsvps"] = run("DELETE FROM rsvps WHERE lower(email)=?")
+        out["signups"] = run("DELETE FROM signups WHERE lower(email)=?")
+        out["messages"] = run("DELETE FROM messages WHERE lower(email)=?")
+        out["poll_answers"] = run("UPDATE responses SET name='', email='' WHERE lower(email)=?")
+        out["photos"] = run("UPDATE photos SET submitted_by='' WHERE instr(lower(submitted_by), ?) > 0")
+        out["emails"] = run("DELETE FROM outbox WHERE lower(to_email)=?")
+        run("DELETE FROM reminders_sent WHERE lower(email)=?")
+    return out
+
+
 # ---------- polls ----------
 
 def poll_out(p, with_questions=True):

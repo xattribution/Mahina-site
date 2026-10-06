@@ -265,6 +265,20 @@ def run():
         {"role": "Secretary", "name": "Rachel Kim", "email": ""},
         {"role": "Events", "name": "Keoni Pua", "email": ""},
     ])
+    # internal planning for the potluck (team only)
+    for kind, title, who, qty, est, cost, done in [
+        ("task", "Reserve Pavilion 3 with MWR", "Keoni Pua", "", None, None, 1),
+        ("task", "Pick up canopy tents from Bldg 1102", "Tom Okada", "", None, None, 0),
+        ("task", "Check-in table, first shift", "Rachel Kim", "", None, None, 0),
+        ("task", "Gate pass list to Security Forces", "Maria Santos", "", None, None, 0),
+        ("buy", "Ice", "Tom Okada", "8 bags", 32, None, 0),
+        ("buy", "Plates, cups, napkins", "Rachel Kim", "100 each", 45, 41.87, 1),
+        ("buy", "Drinks", "Keoni Pua", "6 cases", 72, None, 0),
+        ("buy", "Charcoal", "", "2 bags", 24, None, 0)]:
+        db.run("INSERT INTO plan_items(event_id, kind, title, assignee_name, qty, est_cost, cost, done, done_by, created_by, created) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?)", (potluck, kind, title, who, qty, est, cost, done, who if done else "", "Kalani Akana", at(-5)))
+    db.run("INSERT INTO plan_notes(event_id, author, body, created) VALUES (?,?,?,?)",
+           (potluck, "Kalani Akana", "Pavilion is ours from 9. Setup crew meets at the pavilion at 9:30.", at(-2, 18)))
     slug = db.one("SELECT slug FROM events WHERE id=?", (potluck,))["slug"]
     db.set_setting("banner", {"text": "Potluck dish sign-ups are open", "link": f"/events/{slug}", "active": True})
     print("Seeded demo content.")

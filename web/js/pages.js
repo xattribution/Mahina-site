@@ -1,7 +1,7 @@
 // Home, gallery, polls, give, contact, my sign-ups.
 import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
   clubNow, isoLocal, relDays, me, toast, modal, field, input, onSubmit, honeypot, tagChip, empty, plural, query, copy,
-  setTitle, media, CFG, loading, replaceUrl } from "./core.js";
+  setTitle, media, CFG, loading, replaceUrl, confirmBox } from "./core.js";
 import { moonInfo, moonSVG, palmSVG } from "./moon.js";
 import { timeline } from "./events.js";
 import { EDIT, ed, tool, action, saveSettings, ask, patchEvent } from "./edit.js";
@@ -577,8 +577,19 @@ export async function mine({ token }) {
       } }, r.kind === "rsvp" ? "Not going" : "Cancel"))));
   };
   draw();
-  return h("div.wrap", h("div.page-head", h("h1.h1", data.name ? `Aloha, ${data.name.split(" ")[0]}` : "Your sign-ups"),
-    h("p.lede", data.email)), list);
+  const remove = h("section.forget",
+    h("h2", "Remove me"),
+    h("p.muted", "Delete your name and email from the club's records: RSVPs, sign-ups, the mailing list, and messages you sent."),
+    h("button.btn.ghost", { type: "button", onclick: async () => {
+      if (!(await confirmBox("Delete your info? You'll be taken off every event and sign-up. This can't be undone.", { ok: "Delete my info" }))) return;
+      await api(`/api/me/${token}/remove`, { method: "POST" });
+      me.forget();
+      clear(page).append(h("div.page-head", h("h1.h1", "You're removed."), h("p.lede", "Your name and email are deleted from the club's records.")),
+        link("/", { class: "btn dark" }, "Go home"));
+    } }, "Remove me"));
+  const page = h("div.wrap", h("div.page-head", h("h1.h1", data.name ? `Aloha, ${data.name.split(" ")[0]}` : "Your sign-ups"),
+    h("p.lede", data.email)), list, remove);
+  return page;
 }
 
 // ---------- errors ----------
