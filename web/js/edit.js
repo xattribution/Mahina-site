@@ -53,10 +53,10 @@ function drawBar() {
   clear(bar).append(EDIT.on
     ? [hint("Click any outlined text to change it. Changes save when you click away. Press Esc to undo."),
        palettePick(),
-       h("a.btn.small.ghost", { href: CFG.hashRouting || CFG.memoryRouting ? "#/admin" : "/admin" }, "Admin"),
+       h("a.btn.small.ghost", { href: CFG.hashRouting || CFG.memoryRouting ? "#/team" : "/team" }, "Dashboard"),
        h("button.btn.small", { type: "button", onclick: () => setEditing(false) }, icon("check", 16), "Done")]
     : [h("button.btn.small.light", { type: "button", onclick: () => setEditing(true) }, icon("edit", 16), "Edit page"),
-       h("a.btn.small.ghost", { href: CFG.hashRouting || CFG.memoryRouting ? "#/admin" : "/admin" }, "Admin")]);
+       h("a.btn.small.ghost", { href: CFG.hashRouting || CFG.memoryRouting ? "#/team" : "/team" }, "Dashboard")]);
 }
 
 const SWATCHES = [["classic", "Red, white & blue", "#0F2340", "#C8233B"], ["ocean", "Ocean", "#0B4552", "#C2185B"]];

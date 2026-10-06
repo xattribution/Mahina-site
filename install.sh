@@ -183,7 +183,7 @@ cmd_install() {
   if wait_healthy; then ok "The site is running."; else warn "The site didn't answer yet. Check with: sudo mahina logs"; fi
   local url; url="$(env_get SITE_URL)"
   say ""
-  say "${B}Open ${url}/admin${N} to create the first admin account."
+  say "${B}Open ${url}/login${N} to create the first admin account."
   say ""
   say "  Update:     sudo mahina update"
   say "  Uninstall:  sudo mahina uninstall"

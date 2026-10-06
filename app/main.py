@@ -355,7 +355,7 @@ def contact(request: Request, body: dict = Body(...)):
     club_email = db.get_setting("email")
     if club_email:
         h, t = mailer.render(f"New message from {name}", [("rows", [("From", f"{name} <{email}>"), ("Subject", subject)]), text],
-                             button=("Open inbox", f"{mailer.site_url()}/admin/messages"))
+                             button=("Open inbox", f"{mailer.site_url()}/team/messages"))
         mailer.queue(club_email, f"Contact: {subject or name}", h, t, kind="contact")
     if body.get("subscribe"):
         store.subscribe(email, name, "contact")
@@ -451,6 +451,17 @@ def media_file(name: str):
 
 
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+
+@app.get("/admin", include_in_schema=False)
+@app.get("/admin/{rest:path}", include_in_schema=False)
+def old_admin_links(request: Request, rest: str = ""):
+    """The dashboard moved from /admin to /team. Old bookmarks and emailed links still land in the right place."""
+    from fastapi.responses import RedirectResponse
+    target = "/team" + (f"/{rest}" if rest else "")
+    if request.url.query:
+        target += "?" + request.url.query
+    return RedirectResponse(target, status_code=301)
 
 
 @app.get("/{path:path}", response_class=HTMLResponse)

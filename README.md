@@ -16,7 +16,7 @@ Website and admin console for the Mahina Club, the Space Forces–Indo-Pacific b
 | Contact | Message form, officers, club email | Inbox with read/archive |
 | My sign-ups | Every confirmation email links to a page where people change or cancel, or remove themselves completely | |
 | Email | Confirmations with calendar files, reminders, invites, announcements, unsubscribe and remove-me links | Composer (mailing list, everyone, event attendees, specific people), outbox |
-| Team | | Admin and member accounts, per-area access for members, and an activity log of who did what |
+| Accounts | One sign-in at `/login` for admins and members | Admin and member accounts, per-area access for members, and an activity log of who did what |
 
 ## Install
 
@@ -26,7 +26,7 @@ On any Linux server (Ubuntu, Debian, Fedora, Raspberry Pi OS, and others):
 curl -fsSL https://raw.githubusercontent.com/xattribution/mahina-site/main/install.sh | sudo bash
 ```
 
-It installs Docker if needed and asks three questions: the port, the public address, and whether to load sample content. Then it starts the site. Open the address it prints, add `/admin`, and create the first admin account.
+It installs Docker if needed and asks three questions: the port, the public address, and whether to load sample content. Then it starts the site. Open the address it prints, add `/login`, and create the first admin account.
 
 | Task | Command |
 |---|---|
@@ -59,22 +59,22 @@ The color swatches in the edit bar switch the whole site between two themes:
 - **Red, white & blue:** night blue with a lehua-red accent.
 - **Ocean:** deep teal and seafoam with a hibiscus accent, palm silhouettes against the moon, and a wave edge on the water and footer.
 
-You can also choose a theme under **Admin > Settings > Colors**, and override the button color there. Emails follow the theme too. Every theme color is a CSS variable at the top of `web/css/site.css` (classic) and in the `[data-palette="ocean"]` block, so adding another theme means adding one more block and one entry in `PALETTES` in `app/db.py`.
+You can also choose a theme under **Settings > Colors** in the dashboard, and override the button color there. Emails follow the theme too. Every theme color is a CSS variable at the top of `web/css/site.css` (classic) and in the `[data-palette="ocean"]` block, so adding another theme means adding one more block and one entry in `PALETTES` in `app/db.py`.
 
-Everything else is under **Admin**. Only admins see the edit button; members work in the admin console.
+Everything else is in the dashboard. Only admins see the edit button; members work in the dashboard.
 
-## Team accounts
+## Accounts and sign-in
 
-Everyone signs in at `/admin`. There are two kinds of account, managed under **Admin > Team**:
+Everyone signs in at `/login` (the **Login** link in the site footer) and lands on the same dashboard at `/team`. Admins see extra pages and options there. Old `/admin` links redirect to the dashboard. There are two kinds of account, managed under **Accounts**:
 
 - **Admins** can do everything.
 - **Members** get only the areas an admin ticks: Event planning, Events, Sign-ups, Polls, Gallery, Messages, People, and Email. Members can never change settings, colors, the home page layout, the banner, team accounts, or edit pages in place.
 
 New members start with Event planning. In **Planning**, anyone with access sees each upcoming event's tasks, shopping list, and notes. They can take or assign work, check items off, and record what was spent. A person assigned something by someone else gets an email with a link to the plan.
 
-**Admin > Activity** lists sign-ins, failed sign-ins, and every change, by who and when. It keeps 400 days. Entries name people, not their full email addresses.
+**Activity** lists sign-ins, failed sign-ins, and every change, by who and when. It keeps 400 days. Entries name people, not their full email addresses.
 
-## Admin sign-in
+## Sign-in
 
 **Passwords** follow NIST SP 800-63B-4: at least 15 characters, up to 128, any characters including spaces and emoji. There are no composition rules, no forced changes, and no security questions. New passwords are checked against a list of common passwords, repeated patterns, the club's own name, and the Have I Been Pwned breach list. Only the first 5 characters of a hash leave the server. Passwords are stored with Argon2id. Failed sign-ins are throttled per account and per address. Changing your password signs out your other devices.
 
@@ -82,7 +82,7 @@ New members start with Event planning. In **Planning**, anyone with access sees 
 
 1. Create an OIDC client in the provider with the redirect URI `https://<your site>/api/admin/sso/callback`.
 2. Set `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and `OIDC_NAME` in `.env`.
-3. Add each person's email under **Team**. Only listed emails get in.
+3. Add each person's email under **Accounts**. Only listed emails get in.
 4. Once it works, set `PASSWORD_LOGIN=0` to turn passwords off.
 
 ## Security
@@ -102,7 +102,7 @@ New members start with Event planning. In **Planning**, anyone with access sees 
 
 ## Email
 
-Mail goes out over plain SMTP, so any provider works. Set it in `.env` or in **Admin > Settings > Email**, then use **Send a test**.
+Mail goes out over plain SMTP, so any provider works. Set it in `.env` or in the dashboard under **Settings > Email**, then use **Send a test**.
 
 - **Brevo** (free tier, 300/day): `smtp-relay.brevo.com`, port 587, STARTTLS
 - **Resend**: `smtp.resend.com`, port 465, SSL, user `resend`, password is the API key

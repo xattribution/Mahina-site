@@ -196,7 +196,7 @@ async def sso_start(request: Request):
 async def sso_callback(request: Request):
     from fastapi.responses import RedirectResponse
     client = oauth_client()
-    fail = lambda why: RedirectResponse(f"/admin?sso_error={why}", status_code=303)
+    fail = lambda why: RedirectResponse(f"/login?sso_error={why}", status_code=303)
     try:
         token = await client.authorize_access_token(request)
     except Exception:
@@ -208,7 +208,7 @@ async def sso_callback(request: Request):
     a = db.one("SELECT * FROM admins WHERE email=?", (email,))
     if not a:
         return fail("notadmin")
-    resp = RedirectResponse("/admin", status_code=303)
+    resp = RedirectResponse("/team", status_code=303)
     start_session(resp, a["id"], request)
     return resp
 
@@ -1366,7 +1366,7 @@ def notify_assignee(a, item, ev):
     if item.get("due"):
         rows.append(("Due", item["due"].replace("T", " ")))
     h, t = mailer.render(f"{a['name']} assigned you something", [("rows", rows)] + ([item["details"]] if item.get("details") else []),
-                         button=("Open the plan", f"{mailer.site_url()}/admin/planning/{ev['id']}"))
+                         button=("Open the plan", f"{mailer.site_url()}/team/planning/{ev['id']}"))
     mailer.queue(who["email"], f"Assigned to you: {item['title']}", h, t, kind="assignment")
 
 

@@ -26,8 +26,8 @@ const ago = (s) => {
   if (n < 10080) return `${Math.round(n / 1440)} d ago`;
   return dateCell(s);
 };
-const aHref = (p) => href("/admin" + p);
-const aLink = (p, attrs, ...kids) => link("/admin" + p, attrs, ...kids);
+const aHref = (p) => href("/team" + p);
+const aLink = (p, attrs, ...kids) => link("/team" + p, attrs, ...kids);
 const can = (...perms) => ME?.role === "admin" || perms.some((p) => ME?.perms?.includes(p));
 const isAdmin = () => ME?.role === "admin";
 const money = (n) => (n == null || n === "" ? "" : "$" + Number(n).toFixed(2));
@@ -37,20 +37,21 @@ async function refreshSite() { try { window.SITE = await api("/api/site"); } cat
 // ---------- entry ----------
 export async function render(path) {
   const app = $("#app");
-  const parts = path.replace(/^\/admin\/?/, "").split("/").filter(Boolean);
+  const parts = path.replace(/^\/(team|login)\/?/, "").split("/").filter(Boolean);
   const [section = "", id] = parts;
   let state;
   try { state = await api("/api/admin/state"); } catch (e) { clear(app).append(h("div.auth", h("div.auth-card", h("p", e.message)))); return; }
   STATE = state;
   if (!state.setup) return authScreen(app, "setup");
-  if (!state.admin) return authScreen(app, "login");
+  if (!state.admin) return authScreen(app, "login", path);
+  if (path === "/login") return go("/team", { replace: true });
   ME = state.admin;
   STATE = state;
   const main = h("main.admin-main", loading());
   clear(app).append(layout(section, main));
   window.scrollTo(0, 0);
   const pages = { "": overview, planning: id ? planPage : planningList, events: id ? eventEditor : eventsList, signups: id ? sheetEditorPage : sheetsList,
-    polls: id ? pollEditor : pollsList, gallery: galleryAdmin, messages: inbox, people, email: emailPage, team, activity, settings, account };
+    polls: id ? pollEditor : pollsList, gallery: galleryAdmin, messages: inbox, people, email: emailPage, accounts, activity, settings, account };
   const navItem = NAV.find((n) => n[0] === section);
   try {
     if (navItem && !navAllowed(navItem)) throw new Error("You don't have access to this part. Ask an admin.");
@@ -78,13 +79,13 @@ async function refreshCounts() {
 const NAV = [["", "Overview", "home", null], ["planning", "Planning", "clipboard", ["planning", "events"]], ["events", "Events", "calendar", ["events"]],
   ["signups", "Sign-ups", "list", ["signups", "events"]], ["polls", "Polls", "poll", ["polls"]], ["gallery", "Gallery", "image", ["photos"]],
   ["messages", "Messages", "inbox", ["messages"]], ["people", "People", "people", ["people"]], ["email", "Email", "mail", ["email"]],
-  ["team", "Team", "shield", "admin"], ["activity", "Activity", "history", "admin"], ["settings", "Settings", "gear", "admin"]];
+  ["accounts", "Accounts", "shield", "admin"], ["activity", "Activity", "history", "admin"], ["settings", "Settings", "gear", "admin"]];
 const navAllowed = ([, , , who]) => !who || (who === "admin" ? isAdmin() : can(...who));
 
 function layout(section, main) {
   const nav = NAV.filter(navAllowed);
   const m = moonInfo();
-  const mark = () => link("/admin", { class: "wordmark" }, moonSVG(m.phase, 22, { maria: false }), window.SITE?.club_name || "Mahina Club");
+  const mark = () => link("/team", { class: "wordmark" }, moonSVG(m.phase, 22, { maria: false }), window.SITE?.club_name || "Mahina Club");
   const side = h("aside.side",
     h("div.row", { style: { justifyContent: "space-between" } }, mark(), h("button.icon-btn.menu-close", { type: "button", "aria-label": "Close menu", style: { display: "none" }, onclick: () => side.classList.remove("open") }, icon("close"))),
     h("nav", { "aria-label": "Admin" }, nav.map(([s, t, i]) => aLink(s ? "/" + s : "", { "data-sec": s, "aria-current": s === section ? "page" : null, onclick: () => side.classList.remove("open") },
@@ -93,7 +94,7 @@ function layout(section, main) {
       CFG.demo ? h("div.callout", { style: { margin: "0 0 8px", fontSize: "13px" } }, "Preview only. Edits here aren't saved.") : null,
       aLink("/account", { class: "side-who", "aria-current": section === "account" ? "page" : null }, h("b", ME.name), h("span", ME.email), h("span.role", isAdmin() ? "Admin" : "Member")),
       link("/", {}, icon("external"), "View site"),
-      h("button", { type: "button", onclick: async () => { await api("/api/admin/logout", { method: "POST" }); go("/admin"); } }, icon("logout"), "Sign out")));
+      h("button", { type: "button", onclick: async () => { await api("/api/admin/logout", { method: "POST" }); go("/login"); } }, icon("logout"), "Sign out")));
   const top = h("div.admin-top", mark(), h("button.icon-btn", { type: "button", "aria-label": "Menu", onclick: () => { side.classList.add("open"); $(".menu-close", side).style.display = "inline-grid"; } }, icon("menu", 24)));
   return h("div.admin", side, h("div", top, main));
 }
@@ -116,10 +117,10 @@ function pwField(label, name, { autocomplete = "current-password", isNew = false
   return f;
 }
 
-const SSO_ERRORS = { notadmin: "That account isn't on the team here. Ask an admin to add your email.",
+const SSO_ERRORS = { notadmin: "That account doesn't have access here. Ask an admin to add your email.",
   noemail: "Your sign-in provider didn't share a verified email.", failed: "Single sign-on didn't finish. Try again." };
 
-function authScreen(app, mode) {
+function authScreen(app, mode, path = "/team") {
   setTitle(mode === "setup" ? "Set up" : "Sign in");
   const m = moonInfo();
   const pwOn = mode === "setup" || STATE.password_login !== false;
@@ -132,7 +133,8 @@ function authScreen(app, mode) {
     h("button.btn.block", { type: "submit" }, mode === "setup" ? "Create admin account" : "Sign in")) : null;
   if (form) onSubmit(form, async (v) => {
     await api(`/api/admin/${mode === "setup" ? "setup" : "login"}`, { method: "POST", body: v });
-    render("/admin");
+    // Signed in from /login: go to the dashboard. Signed in from a deep link: stay on it.
+    if (path === "/login") go("/team", { replace: true }); else render(path);
   });
   const sso = mode === "login" && STATE.sso ? h("a.btn.block", { class: pwOn ? "ghost" : "", href: "/api/admin/sso/start" }, `Sign in with ${STATE.sso.name}`) : null;
   clear(app).append(h("div.auth", h("div.auth-card",
@@ -144,7 +146,7 @@ function authScreen(app, mode) {
 }
 
 function head(title, { back, actions, sub } = {}) {
-  setTitle(`Admin: ${title}`);
+  setTitle(title);
   return h("div.a-head", h("div", back ? aLink(back[0], { class: "back" }, icon("left", 18), back[1]) : null, h("h1", title), sub ? h("div.a-sub", sub) : null),
     actions ? h("div.row", actions) : null);
 }
@@ -184,7 +186,7 @@ async function overview() {
 function eventTable(list) {
   return h("div.tbl-wrap", h("table.tbl",
     h("thead", h("tr", h("th", "Date"), h("th", "Event"), h("th", "Status"), h("th.num", "Going"), h("th.num", "Sign-ups"))),
-    h("tbody", list.map((e) => h("tr.click", { onclick: () => go(`/admin/${can("events") ? "events" : "planning"}/${e.id}`) },
+    h("tbody", list.map((e) => h("tr.click", { onclick: () => go(`/team/${can("events") ? "events" : "planning"}/${e.id}`) },
       h("td.date", dateCell(e.starts_at)),
       h("td", h("a.strong", { href: aHref(`/${can("events") ? "events" : "planning"}/${e.id}`), style: { textDecoration: "none" } }, e.title), h("div.sub", `${weekday(parse(e.starts_at))} ${e.all_day ? "" : time(parse(e.starts_at))}`)),
       h("td", pill(e.status)),
@@ -219,7 +221,7 @@ async function eventEditor(id) {
     ["planning", "Planning"], can("email") ? ["invite", "Invite"] : null].filter(Boolean);
   const body = h("div");
   const setTab = (t) => {
-    replaceUrl(`/admin/events/${id}?tab=${t}`);
+    replaceUrl(`/team/events/${id}?tab=${t}`);
     $$(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.t === t)));
     clear(body).append(t === "signups" ? eventSheets(ev) : t === "rsvps" ? rsvpTab(ev) : t === "invite" ? inviteTab(ev) : t === "planning" ? planBoard(ev.id) : eventForm(ev, tags));
   };
@@ -227,9 +229,9 @@ async function eventEditor(id) {
     head(ev.title, { back: ["/events", "Events"], sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`,
       actions: [
         link(`/events/${ev.slug}`, { class: "btn small ghost", target: "_blank" }, icon("external", 16), "View"),
-        h("button.btn.small.ghost", { type: "button", onclick: async () => { const r = await api(`/api/admin/events/${id}/duplicate`, { method: "POST" }); toast("Duplicated as a draft"); go(`/admin/events/${r.id}`); } }, icon("copy", 16), "Duplicate"),
+        h("button.btn.small.ghost", { type: "button", onclick: async () => { const r = await api(`/api/admin/events/${id}/duplicate`, { method: "POST" }); toast("Duplicated as a draft"); go(`/team/events/${r.id}`); } }, icon("copy", 16), "Duplicate"),
         h("button.btn.small.ghost", { type: "button", onclick: async () => {
-          if (await confirmBox(`Delete ${ev.title}? RSVPs and sign-ups for it go too.`)) { await api(`/api/admin/events/${id}`, { method: "DELETE" }); toast("Event deleted"); go("/admin/events"); }
+          if (await confirmBox(`Delete ${ev.title}? RSVPs and sign-ups for it go too.`)) { await api(`/api/admin/events/${id}`, { method: "DELETE" }); toast("Event deleted"); go("/team/events"); }
         } }, icon("trash", 16), "Delete")] }),
     h("div.tabs", { role: "tablist" }, tabs.map(([t, label, n]) => h("button", { type: "button", role: "tab", "data-t": t, "aria-selected": String(t === tab), onclick: () => setTab(t) }, label, n != null ? h("span.n", n) : null))),
     body);
@@ -295,7 +297,7 @@ function eventForm(ev, allTags) {
     } else {
       const r = await api("/api/admin/events", { method: "POST", body });
       toast(st.status === "draft" ? "Draft saved" : "Event created");
-      go(`/admin/events/${r.id}?tab=signups`);
+      go(`/team/events/${r.id}?tab=signups`);
     }
   });
   const panel = h("div.panel",
@@ -418,7 +420,7 @@ async function sheetsList() {
   const list = await api("/api/admin/sheets");
   const body = list.length ? h("div.tbl-wrap", h("table.tbl",
     h("thead", h("tr", h("th", "Sign-up"), h("th", "Event"), h("th", "Status"), h("th.num", "Filled"))),
-    h("tbody", list.map((s) => h("tr.click", { onclick: () => go(s.event_id ? `/admin/events/${s.event_id}?tab=signups` : `/admin/signups/${s.id}`) },
+    h("tbody", list.map((s) => h("tr.click", { onclick: () => go(s.event_id ? `/team/events/${s.event_id}?tab=signups` : `/team/signups/${s.id}`) },
       h("td.strong", s.title), h("td", s.event ? h("span", s.event.title, h("div.sub", dateCell(s.event.starts_at))) : h("span.muted", "Standalone")),
       h("td", pill(s.closed && s.status === "open" ? "closed" : s.status)), h("td.num", `${s.filled} / ${s.capacity}`))))))
     : empty("No sign-ups yet.");
@@ -430,7 +432,7 @@ async function sheetEditorPage(id) {
   if (id === "new") {
     const s = { title: "", description: "", status: "open", show_names: true, slots: [{ title: "", capacity: 1, ask_item: false }] };
     return h("div", head("New sign-up", { back: ["/signups", "Sign-ups"] }), sheetForm(s, null, (r) => {
-      toast("Sign-up created"); go(r.event_id ? `/admin/events/${r.event_id}?tab=signups` : `/admin/signups/${r.id}`);
+      toast("Sign-up created"); go(r.event_id ? `/team/events/${r.event_id}?tab=signups` : `/team/signups/${r.id}`);
     }, events));
   }
   const s = await api(`/api/admin/sheets/${id}`);
@@ -477,7 +479,7 @@ async function pollsList() {
   return h("div", head("Polls", { actions: [aLink("/polls/new", { class: "btn" }, icon("plus", 18), "New poll")] }),
     list.length ? h("div.tbl-wrap", h("table.tbl",
       h("thead", h("tr", h("th", "Poll"), h("th", "Status"), h("th.num", "Responses"), h("th", "Closes"))),
-      h("tbody", list.map((p) => h("tr.click", { onclick: () => go(`/admin/polls/${p.id}`) },
+      h("tbody", list.map((p) => h("tr.click", { onclick: () => go(`/team/polls/${p.id}`) },
         h("td", h("span.strong", p.title), p.event ? h("div.sub", p.event.title) : null),
         h("td", pill(p.closed && p.status === "open" ? "closed" : p.status)), h("td.num", p.responses), h("td.sub", p.closes_at ? dateCell(p.closes_at) : "–"))))))
       : empty("No polls yet.", aLink("/polls/new", { class: "btn dark" }, "New poll")));
@@ -499,7 +501,7 @@ async function pollEditor(id) {
       h("button.btn.small.ghost", { type: "button", onclick: () => copy(location.origin + (CFG.hashRouting ? location.pathname + "#" : "") + `/polls/${poll.slug}`) }, icon("link", 16), "Copy link"),
       link(`/polls/${poll.slug}`, { class: "btn small ghost", target: "_blank" }, icon("external", 16), "View"),
       h("button.btn.small.ghost", { type: "button", onclick: async () => {
-        if (await confirmBox(`Delete “${poll.title}” and its ${plural(poll.responses, "response")}?`)) { await api(`/api/admin/polls/${id}`, { method: "DELETE" }); toast("Poll deleted"); go("/admin/polls"); }
+        if (await confirmBox(`Delete “${poll.title}” and its ${plural(poll.responses, "response")}?`)) { await api(`/api/admin/polls/${id}`, { method: "DELETE" }); toast("Poll deleted"); go("/team/polls"); }
       } }, icon("trash", 16), "Delete")] }),
     isNew ? null : h("div.tabs", { role: "tablist" }, [["build", "Questions"], ["results", "Results", poll.responses]].map(([t, l, n]) =>
       h("button", { type: "button", role: "tab", "data-t": t, "aria-selected": String(t === tab), onclick: () => setTab(t) }, l, n != null ? h("span.n", n) : null))),
@@ -565,7 +567,7 @@ function pollBuilder(poll, events) {
     } else {
       const r = await api("/api/admin/polls", { method: "POST", body });
       toast("Poll created");
-      go(`/admin/polls/${r.id}?tab=build`);
+      go(`/team/polls/${r.id}?tab=build`);
     }
   });
   return h("div.editor", form, panel, h("div.savebar", h("button.btn", { type: "submit", form: "poll-form" }, poll.id ? "Save poll" : "Create poll")));
@@ -736,7 +738,7 @@ async function people() {
     h("div.row.end", h("button.btn", { type: "submit" }, "Add to list")));
   onSubmit(addForm, async (v) => {
     const r = await api("/api/admin/people", { method: "POST", body: v });
-    m?.close(); toast(`${plural(r.added, "person", "people")} added`); go("/admin/people", { replace: true });
+    m?.close(); toast(`${plural(r.added, "person", "people")} added`); go("/team/people", { replace: true });
   });
   let m;
   const active = list.filter((p) => p.active).length;
@@ -812,8 +814,8 @@ async function emailPage() {
     composer({ events: upcoming, audience: pre ? "event" : "subscribers", event_id: pre ? Number(pre) : null }),
     h("section.a-section",
       h("h2", "Outbox", h("div.row",
-        held && s.smtp_ready ? h("button.btn.small", { type: "button", onclick: async () => { await api("/api/admin/outbox/retry", { method: "POST" }); toast("Sending"); go("/admin/email", { replace: true }); } }, `Send ${held} waiting`) : null,
-        held ? h("button.btn.small.ghost", { type: "button", onclick: async () => { if (await confirmBox(`Discard ${plural(held, "unsent email")}?`, { ok: "Discard" })) { await api("/api/admin/outbox/clear", { method: "POST" }); go("/admin/email", { replace: true }); } } }, "Discard waiting") : null)),
+        held && s.smtp_ready ? h("button.btn.small", { type: "button", onclick: async () => { await api("/api/admin/outbox/retry", { method: "POST" }); toast("Sending"); go("/team/email", { replace: true }); } }, `Send ${held} waiting`) : null,
+        held ? h("button.btn.small.ghost", { type: "button", onclick: async () => { if (await confirmBox(`Discard ${plural(held, "unsent email")}?`, { ok: "Discard" })) { await api("/api/admin/outbox/clear", { method: "POST" }); go("/team/email", { replace: true }); } } }, "Discard waiting") : null)),
       out));
 }
 
@@ -937,7 +939,7 @@ async function settings() {
     sec("officers", "Officers", officers, "Listed on the Contact page."),
     sec("gallery", "Gallery", gal),
     sec("email", "Email", mail),
-    sec("team", "Team", h("p.muted", { style: { margin: 0 } }, "Admin and member accounts are under ", aLink("/team", {}, "Team"), ".")));
+    sec("accounts", "Accounts", h("p.muted", { style: { margin: 0 } }, "Admin and member accounts are under ", aLink("/accounts", {}, "Accounts"), ".")));
   const target = anchor();
   if (target) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: "smooth" }), 80);
   return page;
@@ -978,7 +980,7 @@ async function planningList() {
           t.estimate || t.spent ? h("span", `${money(t.spent)} spent`, t.estimate ? h("span.muted", ` of ${money(t.estimate)}`) : null) : null,
           e.notes ? h("span", icon("note", 16), plural(e.notes, "note")) : null)));
   };
-  const reload = () => go("/admin/planning", { replace: true });
+  const reload = () => go("/team/planning", { replace: true });
   return h("div", head("Planning"),
     data.mine.length ? h("section.a-section", h("h2", "Assigned to you"), myTaskList(data.mine, reload)) : null,
     h("section.a-section", h("h2", "Upcoming events"),
@@ -1174,14 +1176,14 @@ function accountForm(acct, perms, defaults, onDone) {
   return form;
 }
 
-async function team() {
+async function accounts() {
   const data = await api("/api/admin/admins");
-  const reload = () => go("/admin/team", { replace: true });
+  const reload = () => go("/team/accounts", { replace: true });
   const open = (acct) => {
     const m = modal(h("div", h("h2", acct ? acct.name : "Add someone"), accountForm(acct, data.perms, data.default_member_perms, () => { m.close(); toast(acct ? "Saved" : "Added"); reload(); })), { label: "Account", wide: true });
   };
   const access = (a) => a.role === "admin" ? h("span", "Everything") : a.perms.length ? h("span", a.perms.map((p) => data.perms[p]).join(", ")) : h("span.muted", "Nothing yet");
-  return h("div", head("Team", { actions: [h("button.btn", { type: "button", onclick: () => open(null) }, icon("plus", 18), "Add someone")] }),
+  return h("div", head("Accounts", { actions: [h("button.btn", { type: "button", onclick: () => open(null) }, icon("plus", 18), "Add someone")] }),
     h("div.tbl-wrap", h("table.tbl",
       h("thead", h("tr", h("th", "Person"), h("th", "Role"), h("th", "Access"), h("th", "Last sign-in"), h("th"))),
       h("tbody", data.accounts.map((a) => h("tr.click", { onclick: (e) => !e.target.closest("button") && open(a) },

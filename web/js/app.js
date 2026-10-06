@@ -94,9 +94,10 @@ function footer() {
         h("a", { href: feed }, "Calendar feed"), S.email ? h("a", { href: `mailto:${S.email}` }, "Email us") : null),
       h("div.foot-sub", h("h3", "Get club news"), sub)),
     h("div.foot-legal", ed(h("p", S.disclaimer || ""), { multiline: true, placeholder: "Footer notice", label: "Footer notice",
-      save: (t) => saveSettings({ disclaimer: t }) }), link("/admin", {}, "Admin"))));
+      save: (t) => saveSettings({ disclaimer: t }) }), link("/login", {}, "Login"))));
 }
 
+const isConsolePath = (p) => p === "/login" || p === "/team" || p.startsWith("/team/");
 let shellBuilt = false;
 function buildShell() {
   const app = $("#app");
@@ -107,16 +108,17 @@ function buildShell() {
 let lastPath = null;
 let cameFromAdmin = false;
 onRender(async (fn, params, path) => {
-  const isAdmin = path.startsWith("/admin");
-  document.body.classList.toggle("admin-mode", isAdmin);
-  if (isAdmin) {
+  if (path === "/admin" || path.startsWith("/admin/")) return go(path.replace(/^\/admin/, "/team") + location.search, { replace: true });  // old links
+  const isConsole = isConsolePath(path);
+  document.body.classList.toggle("admin-mode", isConsole);
+  if (isConsole) {
     shellBuilt = false;
     cameFromAdmin = true;
     const A = await import("./admin.js");
     return A.render(path, params);
   }
   if (!shellBuilt) {
-    if (cameFromAdmin) await initEditing();   // signing in or out happens in Admin; match the edit bar to it
+    if (cameFromAdmin) await initEditing();   // signing in or out happens in the dashboard; match the edit bar to it
     cameFromAdmin = false;
     applyTheme(); buildShell();
   }
@@ -140,7 +142,7 @@ window.addEventListener("mahina:rebuild", async (e) => {
     try { window.SITE = await api("/api/site"); } catch {}
     applyTheme();
   }
-  if (currentPath().startsWith("/admin")) return;
+  if (isConsolePath(currentPath())) return;
   const y = window.scrollY;
   shellBuilt = false;
   lastPath = currentPath();
@@ -161,6 +163,11 @@ route("/polls/:slug", P.pollPage);
 route("/give", P.give);
 route("/contact", P.contact);
 route("/me/:token", P.mine);
+// One sign-in for everyone at /login. The dashboard at /team shows each person only what their account allows.
+route("/login", () => null);
+route("/team", () => null);
+route("/team/:section", () => null);
+route("/team/:section/:id", () => null);
 route("/admin", () => null);
 route("/admin/:section", () => null);
 route("/admin/:section/:id", () => null);
