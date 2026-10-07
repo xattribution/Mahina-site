@@ -869,3 +869,8 @@ body.admin-mode .edit-bar { display: none; }
 .link-picker input[hidden] { display: none; }
 .ev-others { margin: 8px 0 24px; }
 .ev-others .ev-month-label { font-size: 13px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+
+/* calendar card that balances the home page band */
+.cal-card { align-self: center; }
+.cal-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.cal-sub .btn.ghost { background: #fff; }

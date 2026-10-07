@@ -100,7 +100,14 @@ export async function home() {
   const order = S.home_sections?.length ? S.home_sections : Object.keys(build).map((key) => ({ key, on: true }));
   const out = [];
   let band = null;
-  const flushBand = () => { if (band) { out.push(h("section.band", h("div.wrap.split", { class: band.length === 1 ? "single" : "" }, band))); band = null; } };
+  // Polls and the fundraising goal share a two-column band. If only one of them is showing,
+  // the calendar card fills the other side so the band stays balanced.
+  const flushBand = () => {
+    if (!band) return;
+    if (band.length === 1) band.push(calendarCard());
+    out.push(h("section.band", h("div.wrap.split", band)));
+    band = null;
+  };
   for (const sec of order) {
     if (!build[sec.key]) continue;
     const node = sec.on ? build[sec.key]() : null;
@@ -115,6 +122,22 @@ export async function home() {
   }
   flushBand();
   return h("div", hero, out);
+}
+
+// Subscribe to the club calendar in one tap. Events then show up, and stay updated, in people's own calendar apps.
+function calendarCard() {
+  const httpUrl = `${location.origin}/calendar.ics`;
+  const webcal = httpUrl.replace(/^https?:/, "webcal:");
+  const name = encodeURIComponent(window.SITE?.club_name || "Mahina Club");
+  const href = (u) => (CFG.demo ? "#" : u);
+  return h("div.cal-card",
+    h("div.section-head", { style: { marginBottom: "18px" } }, h("h2.h2", "Add our calendar",
+      hint("New events show up in your calendar on their own, and changes and cancellations update there too."))),
+    h("div.cal-sub",
+      h("a.btn", { href: href(`https://calendar.google.com/calendar/r?cid=${encodeURIComponent(webcal)}`), target: "_blank", rel: "noopener" }, "Google"),
+      h("a.btn.ghost", { href: href(webcal) }, "Apple"),
+      h("a.btn.ghost", { href: href(`https://outlook.live.com/calendar/0/addfromweb?url=${encodeURIComponent(httpUrl)}&name=${name}`), target: "_blank", rel: "noopener" }, "Outlook"),
+      h("button.icon-btn", { type: "button", "aria-label": "Copy calendar link", title: "Copy calendar link", onclick: () => copy(httpUrl) }, icon("link", 18))));
 }
 
 // Section controls in edit mode: move up, move down, hide.
