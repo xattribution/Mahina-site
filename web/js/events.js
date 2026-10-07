@@ -5,6 +5,15 @@ import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRang
 import { fullMoons, moonSVG, moonInfo } from "./moon.js";
 import { EDIT, ed, tool, action, ask, patchEvent, pickImage, rebuild } from "./edit.js";
 
+// RSVP and Sign up are separate, so both show when an event has both. RSVP leads in the accent color;
+// Sign up follows in solid night blue (white on dark backgrounds), so no one thinks RSVPing means signing up.
+export function joinButtons(ev, size = "", { onDark = false } = {}) {
+  const out = [];
+  if (ev.rsvp_enabled) out.push(link(`/events/${ev.slug}#rsvp`, { class: `btn ${size}`.trim() }, "RSVP"));
+  if (ev.signup?.open) out.push(link(`/events/${ev.slug}#signups`, { class: `btn ${size} ${onDark ? "light" : "dark"}`.replace(/\s+/g, " ").trim() }, "Sign up"));
+  return out;
+}
+
 const tagColor = (ev) => ev.tags?.[0]?.color || "night";
 
 // ---------- timeline ----------
@@ -178,8 +187,7 @@ function tlItem(ev, now) {
   const cover = ev.cover ? h("img", { src: media(ev.cover.thumb), alt: "", loading: "lazy" }) : null;
   const actions = [];
   if (!past && ev.status !== "cancelled") {
-    if (ev.signup?.open) actions.push(link(`/events/${ev.slug}#signups`, { class: "btn small" }, "Sign up"));
-    else if (ev.rsvp_enabled) actions.push(link(`/events/${ev.slug}#rsvp`, { class: "btn small" }, "RSVP"));
+    actions.push(...joinButtons(ev, "small"));
   }
   if (past && ev.photos) actions.push(link(`/gallery?event=${ev.slug}`, { class: "btn small dark" }, icon("camera", 16), "Photos"));
   actions.push(link(`/events/${ev.slug}`, { class: "btn small ghost" }, "Details"));
@@ -302,8 +310,7 @@ function evRow(ev, now, past) {
   const rel = relDays(d);
   const actions = [];
   if (!past && !cancelled) {
-    if (ev.signup?.open) actions.push(link(`/events/${ev.slug}#signups`, { class: "btn small" }, "Sign up"));
-    else if (ev.rsvp_enabled) actions.push(link(`/events/${ev.slug}#rsvp`, { class: "btn small" }, "RSVP"));
+    actions.push(...joinButtons(ev, "small"));
   }
   if (past && ev.photos) actions.push(link(`/gallery?event=${ev.slug}`, { class: "btn small dark" }, icon("camera", 16), plural(ev.photos, "photo")));
   return h("article.ev-row", { class: `c-${tagColor(ev)}` + (past ? " past" : "") + (cancelled ? " cancelled" : "") },
@@ -475,6 +482,7 @@ function giveBlock(ev) {
 }
 
 function rsvpPanel(ev) {
+  let autoOpened = false;
   const box = h("aside.rsvp#rsvp");
   const draw = (done) => {
     clear(box);
@@ -511,6 +519,8 @@ function rsvpPanel(ev) {
       h("p.going", icon("people", 18), ev.going ? `${ev.going} going` : "Be the first to RSVP",
         ev.capacity ? h("span", ` of ${ev.capacity}`) : null),
       h("button.btn.block", { type: "button", disabled: full, onclick: open }, full ? "Full" : "I'm going"));
+    // Arriving from an RSVP button: open the popup right away.
+    if (anchor() === "rsvp" && !full && !autoOpened) { autoOpened = true; setTimeout(open, 250); }
   };
   draw(null);
   // The RSVP card and the donation block sit apart, so neither feels crowded.

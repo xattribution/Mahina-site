@@ -3,7 +3,7 @@ import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRang
   clubNow, isoLocal, relDays, me, toast, modal, field, input, onSubmit, honeypot, tagChip, empty, plural, query, copy,
   setTitle, media, CFG, loading, replaceUrl, confirmBox } from "./core.js";
 import { moonInfo, moonSVG, palmSVG } from "./moon.js";
-import { timeline } from "./events.js";
+import { timeline, joinButtons } from "./events.js";
 import { EDIT, ed, tool, action, saveSettings, ask, patchEvent } from "./edit.js";
 
 const money = (n) => "$" + Number(n || 0).toLocaleString("en-US");
@@ -224,10 +224,7 @@ async function heroFeature(spot, upcoming, polls) {
       h("span", icon("calendar"), shortDate(d)),
       h("span", icon("clock"), timeRange(ev)),
       ev.location ? h("span", icon("pin"), ev.location) : null),
-    h("div.row",
-      ev.signup?.open ? link(`/events/${ev.slug}#signups`, { class: "btn" }, "Sign up")
-        : ev.rsvp_enabled ? link(`/events/${ev.slug}#rsvp`, { class: "btn" }, "RSVP") : null,
-      link(`/events/${ev.slug}`, { class: "btn ghost" }, "Details")));
+    h("div.row", ...joinButtons(ev, "", { onDark: true }), link(`/events/${ev.slug}`, { class: "btn ghost" }, "Details")));
 }
 
 function pollRow(p) {
