@@ -260,9 +260,24 @@ main { min-height: 60vh; }
 
 /* ---------- timeline ---------- */
 .tl-controls { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
-.tl-arrows { display: flex; gap: 6px; }
-.tl-arrows .icon-btn { box-shadow: inset 0 0 0 1.5px var(--line-2); }
-.tl-arrows .icon-btn:hover { box-shadow: inset 0 0 0 1.5px var(--ink); background: transparent; }
+/* Edges fade only on the side that has more to scroll to. */
+@property --fl { syntax: "<length>"; inherits: true; initial-value: 0px; }
+@property --fr { syntax: "<length>"; inherits: true; initial-value: 0px; }
+.tl-wrap { --fade: clamp(40px, 7vw, 120px); --fl: 0px; --fr: 0px; transition: --fl .35s var(--ease), --fr .35s var(--ease); }
+.tl-wrap.fade-l { --fl: var(--fade); }
+.tl-wrap.fade-r { --fr: var(--fade); }
+.tl-wrap .timeline {
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 var(--fl), #000 calc(100% - var(--fr)), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 var(--fl), #000 calc(100% - var(--fr)), transparent 100%);
+}
+/* The rail: a hairline with a solid thumb. Grows on hover so it's easy to grab. */
+.tl-rail { position: relative; height: 22px; margin-top: 4px; cursor: pointer; touch-action: none; }
+.tl-rail::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; margin-top: -1px; background: var(--line); border-radius: 1px; transition: height .2s var(--ease), margin .2s var(--ease); }
+.tl-thumb { position: absolute; left: 0; top: 50%; height: 4px; margin-top: -2px; border-radius: 2px; background: var(--ink); will-change: transform; transition: height .2s var(--ease), margin .2s var(--ease), background .2s; cursor: grab; }
+.tl-rail:hover .tl-thumb, .tl-rail.active .tl-thumb { height: 8px; margin-top: -4px; border-radius: 4px; }
+.tl-rail:hover::before, .tl-rail.active::before { height: 4px; margin-top: -2px; }
+.tl-rail.active .tl-thumb { background: var(--accent); cursor: grabbing; }
+.tl-rail[hidden] { display: none; }
 .timeline { position: relative; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; cursor: grab; }
 .timeline::-webkit-scrollbar { display: none; }
 .timeline.dragging { cursor: grabbing; user-select: none; }
@@ -345,7 +360,8 @@ main { min-height: 60vh; }
   .tl-item.open .tl-more { grid-template-rows: 1fr; opacity: 1; }
   .tl-m-cover { margin-top: 12px; aspect-ratio: 16/9; border-radius: var(--radius-img); overflow: hidden; }
   .tl-m-cover img { width: 100%; height: 100%; object-fit: cover; }
-  .tl-arrows { display: none; }
+  .tl-rail { display: none; }
+  .tl-wrap .timeline { -webkit-mask-image: none; mask-image: none; }
 }
 @media (min-width: 721px) { .tl-m-cover { display: none; } }
 
@@ -776,3 +792,26 @@ body.admin-mode .edit-bar { display: none; }
   .ev-none { padding-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) { .ev-row, .ev-node, .ev-cover img { transition: none; } }
+
+/* ---------- sign-up slots: pictures, dishes, servings ---------- */
+.slot.has-img .slot-row { grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1.7fr) 104px; }
+.slot-img { width: 64px; height: 64px; border-radius: var(--radius-img); overflow: hidden; background: var(--mist); }
+.slot-img img { width: 100%; height: 100%; object-fit: cover; }
+.sheet-meter b { color: var(--ink); font-weight: 750; }
+/* What people are bringing, laid out like a menu. */
+.dishes { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px 28px; padding: 0 0 20px; }
+.slot.has-img .dishes { padding-left: 84px; }
+.dish { min-width: 0; padding-left: 12px; border-left: 2px solid var(--line); }
+.dish b { display: block; color: var(--ink); font-weight: 700; font-size: 15px; line-height: 1.3; overflow-wrap: anywhere; }
+.dish span { display: block; font-size: 13px; color: var(--muted); margin-top: 2px; }
+.dish span:empty { display: none; }
+.slot.other .slot-title { color: var(--muted); }
+.slot.other .slot-row { padding-top: 16px; }
+@media (max-width: 720px) {
+  .slot.has-img .slot-row { grid-template-columns: 48px minmax(0, 1fr) auto; }
+  .slot.has-img .slot-fill { grid-column: 2 / -1; }
+  .slot-img { width: 48px; height: 48px; }
+  .slot.has-img .dishes { padding-left: 0; }
+  .dishes { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 720px) { .sheet-head { flex-direction: column; align-items: flex-start; gap: 10px; } .sheet-meter { white-space: normal; } }

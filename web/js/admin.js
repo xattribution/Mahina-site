@@ -361,7 +361,8 @@ function pickPhoto(onPick) {
 
 // ---------- sign-up sheets ----------
 const TEMPLATES = {
-  potluck: { title: "Bring a dish", description: "Tell us what you're bringing.", slots: [["Main dish", 6, true], ["Side dish", 8, true], ["Dessert", 6, true], ["Drinks and ice", 3, false], ["Plates and napkins", 2, false]] },
+  potluck: { title: "Bring a dish", description: "Tell us what you're bringing.", allow_other: true,
+    slots: [["Main dish", 6, true, true], ["Side dish", 8, true, true], ["Dessert", 6, true, true], ["Drinks and ice", 3, true, false], ["Plates and napkins", 2, false, false]] },
   volunteer: { title: "Help out", description: "", slots: [["Setup", 4], ["Check-in table", 2], ["Cleanup", 4]] },
   blank: { title: "", description: "", slots: [["", 1]] },
 };
@@ -388,7 +389,8 @@ function sheetCard(s, ev, redraw) {
   };
   return h("div.sheet-card",
     h("div.sheet-card-head",
-      h("div", h("h3", s.title), h("div.a-sub", `${s.filled} of ${s.capacity} filled`, s.status !== "open" ? ", " : "", s.status !== "open" ? pill(s.status) : null)),
+      h("div", h("h3", s.title), h("div.a-sub", [s.capacity ? `${s.filled} of ${s.capacity} filled` : `${plural(s.people, "person", "people")} signed up`,
+        s.servings ? `about ${s.servings} servings` : ""].filter(Boolean).join(", "), s.status !== "open" ? ", " : "", s.status !== "open" ? pill(s.status) : null)),
       h("div.row",
         h("button.btn.small.ghost", { type: "button", onclick: csv(`/api/admin/sheets/${s.id}/export.csv`) }, icon("download", 16), "CSV"),
         h("button.btn.small.ghost", { type: "button", onclick: () => openSheetEditor(ev, s, null, reload) }, icon("edit", 16), "Edit"),
@@ -396,8 +398,10 @@ function sheetCard(s, ev, redraw) {
           if (await confirmBox(`Delete “${s.title}” and everyone signed up for it?`)) { await api(`/api/admin/sheets/${s.id}`, { method: "DELETE" }); toast("Sign-up deleted"); reload(); }
         } }, icon("trash", 16)))),
     h("div.roster", s.slots.map((sl) => h("div",
-      h("div.slot-name", h("span", sl.title, sl.starts_at ? h("span.muted", { style: { fontWeight: 500 } }, "  " + timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : null), h("span.muted.small", `${sl.taken} of ${sl.capacity}`)),
-      sl.signups.length ? sl.signups.map((u) => h("div.who", h("span.strong", u.name), h("a", { href: `mailto:${u.email}`, class: "muted" }, u.email), h("span", u.item || (u.qty > 1 ? `×${u.qty}` : "")),
+      h("div.slot-name", h("span", sl.image ? h("img.slot-thumb", { src: media(sl.image.thumb), alt: "" }) : null, sl.title, sl.starts_at ? h("span.muted", { style: { fontWeight: 500 } }, "  " + timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : null),
+        h("span.muted.small", [sl.unlimited ? plural(sl.taken, "person", "people") : `${sl.taken} of ${sl.capacity}`, sl.servings ? `about ${sl.servings} servings` : ""].filter(Boolean).join(", "))),
+      sl.signups.length ? sl.signups.map((u) => h("div.who", h("span.strong", u.name), h("a", { href: `mailto:${u.email}`, class: "muted" }, u.email),
+        h("span", [u.item, u.servings ? `feeds ${u.servings}` : "", u.qty > 1 ? `×${u.qty}` : ""].filter(Boolean).join(", ")),
         h("button.icon-btn", { type: "button", "aria-label": `Remove ${u.name}`, onclick: async () => {
           if (await confirmBox(`Remove ${u.name} from ${sl.title}?`, { ok: "Remove" })) { await api(`/api/admin/signups/${u.id}`, { method: "DELETE" }); reload(); }
         } }, icon("close", 16)))) : h("div.who", h("span.muted", "No one yet"))))));
@@ -405,13 +409,29 @@ function sheetCard(s, ev, redraw) {
 
 function openSheetEditor(ev, sheet, template, onSaved) {
   const t = template ? TEMPLATES[template] : null;
-  const s = sheet ? JSON.parse(JSON.stringify(sheet)) : { title: t.title, description: t.description, status: "open", show_names: true, closes_at: "",
-    slots: t.slots.map(([title, capacity, ask]) => ({ title, capacity, ask_item: !!ask, note: "" })) };
+  const s = sheet ? JSON.parse(JSON.stringify(sheet)) : { title: t.title, description: t.description, status: "open", show_names: true, closes_at: "", allow_other: !!t.allow_other,
+    slots: t.slots.map(([title, capacity, ask, serves]) => ({ title, capacity, ask_item: !!ask, ask_servings: !!serves, note: "" })) };
   const node = sheetForm(s, ev, async (saved) => { m.close(); toast(sheet ? "Sign-up saved" : "Sign-up added"); await onSaved(saved); });
   const m = modal(h("div", h("h2", sheet ? "Edit sign-up" : "New sign-up"), node), { wide: true, label: "Sign-up editor" });
 }
 
+// Pick a picture for a sign-up slot: upload one, or reuse a gallery photo.
+function pickSlotImage(current, onPick) {
+  const grid = h("div.pgrid", loading());
+  const upload = h("label.btn.small", { style: { cursor: "pointer" } }, icon("image", 16), "Upload",
+    h("input", { type: "file", accept: "image/*", hidden: true, onchange: async (x) => {
+      const fd = new FormData(); fd.append("file", x.target.files[0]);
+      try { onPick(await api("/api/admin/settings/cover", { method: "POST", form: fd })); m.close(); } catch (e) { toast(e.message, "error"); }
+    } }));
+  const m = modal(h("div", h("h2", "Picture"), h("div.row", { style: { marginBottom: "16px" } }, upload,
+    current ? h("button.btn.small.ghost", { type: "button", onclick: () => { onPick(null); m.close(); } }, "Remove") : null), grid), { wide: true, label: "Picture" });
+  api("/api/admin/photos").then((list) => clear(grid).append(list.filter((p) => p.status !== "pending").map((p) =>
+    h("button.pthumb", { type: "button", onclick: () => { onPick(p); m.close(); } }, h("img", { src: media(p.thumb), alt: p.caption || "" })))))
+    .catch(() => clear(grid));
+}
+
 function sheetForm(s, ev, onSaved, events) {
+  s = { ...s, slots: (s.slots || []).filter((x) => !x.is_other).map((x) => ({ ...x })) };
   const rows = h("div.rows-edit");
   const evDate = ev ? ev.starts_at.slice(0, 10) : "";
   const drawRows = () => {
@@ -421,13 +441,18 @@ function sheetForm(s, ev, onSaved, events) {
       const bind = (k, conv = (x) => x) => (x) => { sl[k] = conv(x.target.type === "checkbox" ? x.target.checked : x.target.value); };
       const tval = (v) => (v ? v.slice(11, 16) : "");
       const toIso = (v) => (v ? `${(sl.starts_at || sl.ends_at || evDate || isoLocal(clubNow())).slice(0, 10)}T${v}` : "");
+      const pic = h("button.slot-pic", { type: "button", "aria-label": sl.image ? "Change picture" : "Add a picture", title: sl.image ? "Change picture" : "Add a picture",
+        onclick: () => pickSlotImage(sl.image, (p) => { sl.image = p; sl.photo_id = p?.id || null; drawRows(); }) },
+        sl.image ? h("img", { src: media(sl.image.thumb), alt: "" }) : icon("image", 18));
       return h("div.row-edit",
         h("div.mv", h("button", { type: "button", "aria-label": "Move up", onclick: up }, icon("up", 16)), h("button", { type: "button", "aria-label": "Move down", onclick: down }, icon("down", 16))),
-        h("input", { value: sl.title, placeholder: "Slot name", "aria-label": "Slot name", oninput: bind("title") }),
-        h("input", { type: "number", min: 1, value: sl.capacity, "aria-label": "How many", oninput: bind("capacity", Number) }),
+        pic,
+        h("input", { type: "text", value: sl.title, placeholder: "Slot name", "aria-label": "Slot name", oninput: bind("title") }),
+        h("input", { type: "number", min: 0, value: sl.capacity || "", placeholder: "No limit", "aria-label": "How many", oninput: (x) => { sl.capacity = x.target.value === "" ? 0 : Number(x.target.value); } }),
         h("input", { type: "time", value: tval(sl.starts_at), "aria-label": "Start time", oninput: (x) => (sl.starts_at = toIso(x.target.value)) }),
         h("input", { type: "time", value: tval(sl.ends_at), "aria-label": "End time", oninput: (x) => (sl.ends_at = toIso(x.target.value)) }),
-        h("label.check", h("input", { type: "checkbox", checked: sl.ask_item, onchange: bind("ask_item") }), "Ask what"),
+        h("label.check.center", h("input", { type: "checkbox", checked: sl.ask_item, "aria-label": "Ask what they're bringing", onchange: bind("ask_item") })),
+        h("label.check.center", h("input", { type: "checkbox", checked: !!sl.ask_servings, "aria-label": "Ask how many it feeds", onchange: bind("ask_servings") })),
         h("button.icon-btn", { type: "button", "aria-label": "Remove slot", onclick: () => { s.slots.splice(i, 1); drawRows(); } }, icon("trash", 18)));
     }));
   };
@@ -437,13 +462,16 @@ function sheetForm(s, ev, onSaved, events) {
     field("Note", input("description", { value: s.description }), { optional: true }),
     events ? field("Event", sel("event_id", [["", "No event"], ...events.map((e) => [e.id, `${e.title}, ${dateCell(e.starts_at)}`])], s.event_id)) : null,
     h("div",
-      h("div.row-head", h("span"), h("span", "Slot"), h("span", "How many"), h("span", "Starts"), h("span", "Ends"), h("span", "", hint("Ask people what they're bringing, like a dish name.")), h("span")),
+      h("div.row-head", h("span"), h("span"), h("span", "Slot"), h("span", "How many", hint("Leave blank for no limit.")), h("span", "Starts"), h("span", "Ends"),
+        h("span", "Ask what", hint("People say what they're bringing, like a dish name. Everyone can see the list.")),
+        h("span", "Servings", hint("People say about how many it feeds, so you can see if there's enough of each thing.")), h("span")),
       rows,
-      h("button.btn.small.ghost", { type: "button", style: { marginTop: "12px" }, onclick: () => { s.slots.push({ title: "", capacity: 1, ask_item: false }); drawRows(); $$(".row-edit input", rows).at(-4)?.focus(); } }, icon("plus", 16), "Add slot")),
+      h("button.btn.small.ghost", { type: "button", style: { marginTop: "12px" }, onclick: () => { s.slots.push({ title: "", capacity: 1, ask_item: false, ask_servings: false }); drawRows(); $$(".row-edit input[aria-label='Slot name']", rows).at(-1)?.focus(); } }, icon("plus", 16), "Add slot")),
     h("div.two",
       field("Status", sel("status", [["open", "Open"], ["closed", "Closed"], ["hidden", "Hidden"]], s.status)),
       field("Closes", input("closes_at", { type: "datetime-local", value: s.closes_at || "" }), { optional: true })),
-    sw("show_names", "Show names publicly", s.show_names, { hintText: "Shows first name and last initial next to each slot." }),
+    sw("show_names", "Show names publicly", s.show_names, { hintText: "Shows first name and last initial next to each slot. What people bring always shows." }),
+    sw("allow_other", "Let people add something not on the list", s.allow_other, { hintText: "Adds a “Something else” row where people write in what they're bringing." }),
     h("p.form-error"),
     h("div.row.end", h("button.btn", { type: "submit" }, "Save sign-up")));
   onSubmit(form, async (v) => {

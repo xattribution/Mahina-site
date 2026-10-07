@@ -414,11 +414,11 @@ def event_duplicate(eid: int, a=can("events")):
     for t in db.q("SELECT tag_id FROM event_tags WHERE event_id=?", (eid,)):
         db.run("INSERT INTO event_tags(event_id, tag_id) VALUES (?,?)", (new, t["tag_id"]))
     for s in db.q("SELECT * FROM sheets WHERE event_id=?", (eid,)):
-        sid = db.run("INSERT INTO sheets(event_id, title, description, status, show_names, sort, created) VALUES (?,?,?,?,?,?,?)",
-                     (new, s["title"], s["description"], s["status"], s["show_names"], s["sort"], db.now_iso()))
+        sid = db.run("INSERT INTO sheets(event_id, title, description, status, show_names, allow_other, sort, created) VALUES (?,?,?,?,?,?,?,?)",
+                     (new, s["title"], s["description"], s["status"], s["show_names"], s["allow_other"], s["sort"], db.now_iso()))
         for sl in db.q("SELECT * FROM slots WHERE sheet_id=?", (s["id"],)):
-            db.run("INSERT INTO slots(sheet_id, title, note, capacity, ask_item, sort) VALUES (?,?,?,?,?,?)",
-                   (sid, sl["title"], sl["note"], sl["capacity"], sl["ask_item"], sl["sort"]))
+            db.run("INSERT INTO slots(sheet_id, title, note, capacity, ask_item, ask_servings, photo_id, is_other, sort) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (sid, sl["title"], sl["note"], sl["capacity"], sl["ask_item"], sl["ask_servings"], sl["photo_id"], sl["is_other"], sl["sort"]))
     audit(a, "Duplicated event", ev["title"])
     return {"id": new}
 
@@ -490,18 +490,21 @@ def save_slots(sid, slots):
         title = clean(sl.get("title"), 120)
         if not title:
             continue
-        cap = max(1, min(int(sl.get("capacity") or 1), 999))
+        raw = str(sl.get("capacity") if sl.get("capacity") is not None else "").strip()
+        cap = 0 if raw in ("", "0") else max(1, min(int(raw) if raw.isdigit() else 1, 999))  # 0 = no limit
+        photo = sl.get("photo_id")
+        photo = int(photo) if str(photo or "").isdigit() and db.one("SELECT 1 FROM photos WHERE id=?", (int(photo),)) else None
         vals = (title, clean(sl.get("note"), 200), cap, clean(sl.get("starts_at"), 16) or None,
-                clean(sl.get("ends_at"), 16) or None, 1 if sl.get("ask_item") else 0, i)
-        if sl.get("id") and db.one("SELECT id FROM slots WHERE id=? AND sheet_id=?", (sl["id"], sid)):
-            db.run("UPDATE slots SET title=?, note=?, capacity=?, starts_at=?, ends_at=?, ask_item=?, sort=? WHERE id=?",
-                   vals + (sl["id"],))
+                clean(sl.get("ends_at"), 16) or None, 1 if sl.get("ask_item") else 0, 1 if sl.get("ask_servings") else 0, photo, i)
+        if sl.get("id") and db.one("SELECT id FROM slots WHERE id=? AND sheet_id=? AND is_other=0", (sl["id"], sid)):
+            db.run("UPDATE slots SET title=?, note=?, capacity=?, starts_at=?, ends_at=?, ask_item=?, ask_servings=?, photo_id=?, sort=? "
+                   "WHERE id=?", vals + (sl["id"],))
             keep.append(int(sl["id"]))
         else:
-            keep.append(db.run("INSERT INTO slots(title, note, capacity, starts_at, ends_at, ask_item, sort, sheet_id) "
-                               "VALUES (?,?,?,?,?,?,?,?)", vals + (sid,)))
+            keep.append(db.run("INSERT INTO slots(title, note, capacity, starts_at, ends_at, ask_item, ask_servings, photo_id, sort, sheet_id) "
+                               "VALUES (?,?,?,?,?,?,?,?,?,?)", vals + (sid,)))
     marks = ",".join("?" * len(keep)) or "NULL"
-    db.run(f"DELETE FROM slots WHERE sheet_id=? AND id NOT IN ({marks})", (sid, *keep))
+    db.run(f"DELETE FROM slots WHERE sheet_id=? AND is_other=0 AND id NOT IN ({marks})", (sid, *keep))
 
 
 def sheet_fields(body):
@@ -510,23 +513,25 @@ def sheet_fields(body):
         raise Invalid("Give the sign-up a title.", "title")
     return (body.get("event_id") or None, title, clean(body.get("description"), 1000, multiline=True),
             body.get("status") if body.get("status") in ("open", "closed", "hidden") else "open",
-            clean(body.get("closes_at"), 16) or None, 1 if body.get("show_names", True) else 0)
+            clean(body.get("closes_at"), 16) or None, 1 if body.get("show_names", True) else 0, 1 if body.get("allow_other") else 0)
 
 
 @router.post("/sheets")
 def sheet_create(body: dict = Body(...), a=can("signups", "events")):
-    sid = db.run("INSERT INTO sheets(event_id, title, description, status, closes_at, show_names, created) VALUES (?,?,?,?,?,?,?)",
-                 sheet_fields(body) + (db.now_iso(),))
+    sid = db.run("INSERT INTO sheets(event_id, title, description, status, closes_at, show_names, allow_other, created) "
+                 "VALUES (?,?,?,?,?,?,?,?)", sheet_fields(body) + (db.now_iso(),))
     save_slots(sid, body.get("slots"))
+    store.ensure_other_slot(sid, bool(body.get("allow_other")))
     audit(a, "Created sign-up", clean(body.get("title"), 120))
     return {"id": sid}
 
 
 @router.put("/sheets/{sid}")
 def sheet_update(sid: int, body: dict = Body(...), a=can("signups", "events")):
-    db.run("UPDATE sheets SET event_id=?, title=?, description=?, status=?, closes_at=?, show_names=? WHERE id=?",
+    db.run("UPDATE sheets SET event_id=?, title=?, description=?, status=?, closes_at=?, show_names=?, allow_other=? WHERE id=?",
            sheet_fields(body) + (sid,))
     save_slots(sid, body.get("slots"))
+    store.ensure_other_slot(sid, bool(body.get("allow_other")))
     audit(a, "Edited sign-up", clean(body.get("title"), 120))
     return {"id": sid}
 
@@ -559,10 +564,11 @@ def slot_add(sid: int, body: dict = Body(...), a=can("signups", "events")):
     title = clean(body.get("title"), 120)
     if not title:
         raise Invalid("Name the slot.", "title")
-    cap = max(1, min(int(body.get("capacity") or 1), 999))
-    n = db.one("SELECT COALESCE(MAX(sort),0)+1 n FROM slots WHERE sheet_id=?", (sid,))["n"]
-    new = db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, sort) VALUES (?,?,?,?,?)",
-                 (sid, title, cap, 1 if body.get("ask_item") else 0, n))
+    raw = str(body.get("capacity") if body.get("capacity") is not None else "1").strip()
+    cap = 0 if raw == "0" else max(1, min(int(raw) if raw.isdigit() else 1, 999))
+    n = db.one("SELECT COALESCE(MAX(sort),0)+1 n FROM slots WHERE sheet_id=? AND is_other=0", (sid,))["n"]
+    new = db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, ask_servings, sort) VALUES (?,?,?,?,?,?)",
+                 (sid, title, cap, 1 if body.get("ask_item") else 0, 1 if body.get("ask_servings") else 0, n))
     audit(a, "Added sign-up slot", f"{title}, {title_of('sheets', sid)}")
     return {"id": new}
 
@@ -579,11 +585,14 @@ def slot_patch(slot_id: int, body: dict = Body(...), a=can("signups", "events"))
     if "capacity" in body:
         cap = int(body["capacity"]) if str(body["capacity"]).isdigit() else 0
         taken = db.one("SELECT COALESCE(SUM(qty),0) n FROM signups WHERE slot_id=?", (slot_id,))["n"]
-        if cap < max(1, taken):
+        if cap and cap < max(1, taken):
             raise Invalid(f"{taken} people already signed up, so it can't go below {max(1, taken)}.", "capacity")
         cap = min(cap, 999)
-    db.run("UPDATE slots SET title=?, note=?, capacity=? WHERE id=?",
-           (title, clean(body.get("note", sl["note"]), 200), cap, slot_id))
+    photo = sl["photo_id"]
+    if "photo_id" in body:
+        photo = int(body["photo_id"]) if str(body["photo_id"] or "").isdigit() and db.one("SELECT 1 FROM photos WHERE id=?", (int(body["photo_id"]),)) else None
+    db.run("UPDATE slots SET title=?, note=?, capacity=?, photo_id=? WHERE id=?",
+           (title, clean(body.get("note", sl["note"]), 200), cap, photo, slot_id))
     audit(a, "Edited sign-up slot", title)
     return {"ok": True}
 
@@ -617,9 +626,9 @@ def signup_add(slot_id: int, body: dict = Body(...), a=can("signups", "events"))
 def sheet_export(sid: int, a=can("signups", "events")):
     audit(a, "Downloaded sign-up list", title_of("sheets", sid))
     s = store.sheet_out(db.one("SELECT * FROM sheets WHERE id=?", (sid,)), admin=True)
-    rows = [[sl["title"], u["name"], u["email"], u["phone"], u["qty"], u["item"], u["created"]]
+    rows = [[sl["title"], u["name"], u["email"], u["phone"], u["qty"], u["item"], u["servings"] or "", u["created"]]
             for sl in s["slots"] for u in sl["signups"]]
-    return csv_response(f"signup-{sid}.csv", ["Slot", "Name", "Email", "Phone", "Qty", "Bringing", "When"], rows)
+    return csv_response(f"signup-{sid}.csv", ["Slot", "Name", "Email", "Phone", "Qty", "Bringing", "Servings", "When"], rows)
 
 
 # ---------- polls ----------

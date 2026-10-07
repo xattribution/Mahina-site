@@ -206,6 +206,11 @@ ADDED_COLUMNS = [
     ("admins", "role", "TEXT NOT NULL DEFAULT 'admin'"),
     ("admins", "perms", "TEXT NOT NULL DEFAULT '[]'"),
     ("admins", "last_login", "TEXT"),
+    ("slots", "photo_id", "INTEGER REFERENCES photos(id) ON DELETE SET NULL"),
+    ("slots", "ask_servings", "INTEGER DEFAULT 0"),
+    ("slots", "is_other", "INTEGER DEFAULT 0"),
+    ("signups", "servings", "INTEGER"),
+    ("sheets", "allow_other", "INTEGER DEFAULT 0"),
 ]
 
 

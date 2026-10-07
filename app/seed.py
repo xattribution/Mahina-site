@@ -129,15 +129,22 @@ def run():
                     "and grab a shift if you can help set up or clean up.\n\nKeiki games at noon. Bring sunscreen.",
                     ["Potluck", "ʻOhana"], cover=photo("food-spread.jpg", status="cover"), reminders=(48, 3))
     rsvps(potluck, 14, at(-3, 10))
-    sh = db.run("INSERT INTO sheets(event_id, title, description, created) VALUES (?,?,?,?)",
+    sh = db.run("INSERT INTO sheets(event_id, title, description, allow_other, created) VALUES (?,?,?,1,?)",
                 (potluck, "Bring a dish", "Tell us what you're bringing so we don't end up with twelve mac salads.", db.now_iso()))
-    slots = [("Main dish", 6, 1), ("Side dish", 8, 1), ("Dessert", 6, 1), ("Drinks and ice", 3, 1), ("Plates and napkins", 2, 0)]
-    for i, (t, cap, ask) in enumerate(slots):
-        sid = db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, sort) VALUES (?,?,?,?,?)", (sh, t, cap, ask, i))
+    slots = [("Main dish", 6, 1, 1, "buffet-table.jpg"), ("Side dish", 8, 1, 1, "food-variety.jpg"), ("Dessert", 6, 1, 1, "table-dishes.jpg"),
+             ("Drinks and ice", 3, 1, 0, None), ("Plates and napkins", 2, 0, 0, None)]
+    for i, (t, cap, ask, serves, img) in enumerate(slots):
+        pid = photo(img, status="cover") if img else None
+        sid = db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, ask_servings, photo_id, sort) VALUES (?,?,?,?,?,?,?)",
+                     (sh, t, cap, ask, serves, pid, i))
         for name in random.sample(NAMES, {0: 4, 1: 5, 2: 6, 3: 1, 4: 0}[i]):
             item = random.choice(DISHES) if ask else ""
-            db.run("INSERT INTO signups(slot_id, name, email, qty, item, token, created) VALUES (?,?,?,?,?,?,?)",
-                   (sid, name, email_for(name), 1, item, db.token(), at(-2, 10)))
+            db.run("INSERT INTO signups(slot_id, name, email, qty, item, servings, token, created) VALUES (?,?,?,?,?,?,?,?)",
+                   (sid, name, email_for(name), 1, item, random.choice([8, 10, 12, 15, 20]) if serves else None, db.token(), at(-2, 10)))
+    other = db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, ask_servings, is_other, sort) VALUES (?,?,0,1,1,1,9999)",
+                   (sh, "Something else"))
+    db.run("INSERT INTO signups(slot_id, name, email, qty, item, servings, token, created) VALUES (?,?,?,?,?,?,?,?)",
+           (other, "Keoni Pua", email_for("Keoni Pua"), 1, "Kalua pig", 30, db.token(), at(-1, 18)))
     sh = db.run("INSERT INTO sheets(event_id, title, description, sort, created) VALUES (?,?,?,?,?)",
                 (potluck, "Help out", "", 1, db.now_iso()))
     for i, (t, h0, h1, cap) in enumerate([("Setup", 9, 11, 4), ("Grill", 11, 13, 2), ("Keiki games", 12, 13, 2),

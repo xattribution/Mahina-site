@@ -35,83 +35,140 @@ export function timeline(events, { compact = false, from = null } = {}) {
   }
   const track = h("div.tl-track", items);
   const tl = h("div.timeline", { class: compact ? "compact" : "", tabindex: 0, "aria-label": "Event timeline" }, track);
-  requestAnimationFrame(() => {
-    const t = $("#tl-today", tl);
-    if (t && window.innerWidth > 720) tl.scrollLeft = Math.max(0, t.offsetLeft - (compact ? 260 : 320));
-  });
+  const thumb = h("span.tl-thumb");
+  const rail = h("div.tl-rail", { "aria-hidden": "true" }, thumb);
+  const wrap = h("div.tl-wrap", tl, h("div.wrap", rail));
 
-  // Scroll-to-step: over the timeline, the wheel (or arrow keys/buttons) moves one event at a time,
-  // centers it, and opens it. Past either end, the page scrolls as usual.
+  // Scrolling model: one animation loop owns scrollLeft. Wheel, keys, the rail, and snapping all move a target,
+  // and the loop eases toward it, so inputs never fight each other. When input stops, the nearest event
+  // glides to the center and opens. Past either end, the wheel goes back to scrolling the page.
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const desktop = () => window.innerWidth > 720;
   const evItems = () => $$(".tl-item", track);
   const px = (el, v) => parseFloat(getComputedStyle(el).getPropertyValue(v)) || 0;
-  let focus = -1;
-  const settledLeft = (target) => {
+  const maxLeft = () => Math.max(0, tl.scrollWidth - tl.clientWidth);
+  const clamp = (x) => Math.max(0, Math.min(maxLeft(), x));
+  let focus = -1, target = 0, raf = 0, settleTimer = 0;
+
+  const loop = () => {
+    const cur = tl.scrollLeft, diff = target - cur;
+    if (Math.abs(diff) < 0.6 || reduced) { tl.scrollLeft = target; raf = 0; return; }
+    tl.scrollLeft = cur + diff * 0.2;
+    raf = requestAnimationFrame(loop);
+  };
+  const glide = (x) => { target = clamp(x); if (!raf) raf = requestAnimationFrame(loop); };
+  const stopGlide = () => { cancelAnimationFrame(raf); raf = 0; target = tl.scrollLeft; };
+
+  const settledLeft = (el) => {
     // Widths animate, so add up the widths each item is heading to rather than reading offsetLeft.
     let x = px(track, "padding-left");
     for (const c of track.children) {
-      if (c === target) return x;
+      if (c === el) return x;
       x += c.classList.contains("tl-item") ? px(c, c.classList.contains("open") ? "--open" : "--w") : c.offsetWidth;
     }
     return x;
   };
-  const nearest = () => {
-    const mid = tl.scrollLeft + tl.clientWidth / 2;
+  const nearest = (at = tl.scrollLeft) => {
+    const mid = at + tl.clientWidth / 2;
     let best = 0, dist = Infinity;
-    evItems().forEach((it, i) => { const d = Math.abs(it.offsetLeft + it.offsetWidth / 2 - mid); if (d < dist) { dist = d; best = i; } });
+    evItems().forEach((it, i) => { const d = Math.abs(it.offsetLeft + px(it, "--w") / 2 - mid); if (d < dist) { dist = d; best = i; } });
     return best;
   };
-  const clearFocus = () => { focus = -1; evItems().forEach((x) => x.classList.remove("open", "centered")); };
+  const clearFocus = () => { focus = -1; evItems().forEach((x) => x.classList.remove("open")); };
   const focusOn = (i) => {
     const list = evItems();
+    if (!list.length) return;
     focus = Math.max(0, Math.min(list.length - 1, i));
     list.forEach((x, k) => x.classList.toggle("open", k === focus));
     const it = list[focus];
-    tl.scrollTo({ left: settledLeft(it) + (px(it, "--open") - 28) / 2 - tl.clientWidth / 2, behavior: reduced ? "auto" : "smooth" });
+    glide(settledLeft(it) + (px(it, "--open") - 28) / 2 - tl.clientWidth / 2);
+  };
+  const settle = (delay = 160) => {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => { focusOn(nearest(target)); }, delay);
   };
   const step = (dir) => {
+    tl.classList.add("stepping");
     const list = evItems();
     const next = focus < 0 ? nearest() : focus + dir;
-    if (next < 0 || next >= list.length) return false;
-    focusOn(next);
-    return true;
+    if (next >= 0 && next < list.length) focusOn(next);
   };
-  let acc = 0, lastStep = 0;
+
   tl.addEventListener("wheel", (e) => {
-    if (window.innerWidth <= 720 || e.ctrlKey) return;
-    const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-    const dir = Math.sign(d);
-    if (!dir) return;
-    const list = evItems();
-    if (focus >= 0 && ((dir > 0 && focus >= list.length - 1) || (dir < 0 && focus <= 0))) { tl.classList.remove("stepping"); return; }
+    if (!desktop() || e.ctrlKey) return;
+    const horizontal = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+    const d = (horizontal ? e.deltaX : e.deltaY) * (e.deltaMode === 1 ? 32 : e.deltaMode === 2 ? tl.clientWidth : 1);
+    if (!d) return;
+    const base = raf ? target : tl.scrollLeft;
+    // At either end, let the page scroll on.
+    if ((d < 0 && base <= 0.5) || (d > 0 && base >= maxLeft() - 0.5)) { tl.classList.remove("stepping"); return; }
     e.preventDefault();
     tl.classList.add("stepping");
-    acc += d * (e.deltaMode === 1 ? 40 : 1);
-    const t = performance.now();
-    if (Math.abs(acc) < 40 || t - lastStep < 170) return;
-    acc = 0; lastStep = t;
-    step(dir);
+    glide(base + d * 1.15);
+    settle();
   }, { passive: false });
   // Real pointer movement hands control back to hover.
-  tl.addEventListener("mousemove", (e) => { if (e.movementX || e.movementY) tl.classList.remove("stepping"); });
+  tl.addEventListener("mousemove", (e) => { if ((e.movementX || e.movementY) && !raf) tl.classList.remove("stepping"); });
   track.addEventListener("mouseover", (e) => {
     if (tl.classList.contains("stepping")) return;
     const it = e.target.closest(".tl-item");
     if (it && focus >= 0 && !it.classList.contains("open")) clearFocus();
   });
   tl.addEventListener("keydown", (e) => {
-    if (window.innerWidth <= 720 || (e.key !== "ArrowRight" && e.key !== "ArrowLeft")) return;
+    if (!desktop() || (e.key !== "ArrowRight" && e.key !== "ArrowLeft")) return;
     e.preventDefault();
-    tl.classList.add("stepping");
     step(e.key === "ArrowRight" ? 1 : -1);
   });
-  enableDrag(tl, clearFocus);
+  enableDrag(tl, () => { stopGlide(); clearFocus(); }, () => { target = tl.scrollLeft; settle(60); });
 
-  const press = (dir) => { tl.classList.add("stepping"); step(dir); };
-  const arrows = h("div.tl-arrows",
-    h("button.icon-btn", { type: "button", "aria-label": "Earlier event", onclick: () => press(-1) }, icon("left")),
-    h("button.icon-btn", { type: "button", "aria-label": "Later event", onclick: () => press(1) }, icon("right")));
-  return { el: tl, arrows };
+  // Rail: shows where you are and how much there is. Drag the thumb or click the rail to jump.
+  let railFrame = 0;
+  const drawRail = () => {
+    railFrame = 0;
+    const max = maxLeft(), w = rail.clientWidth;
+    rail.hidden = max <= 1;
+    const size = Math.max(36, w * (tl.clientWidth / tl.scrollWidth));
+    thumb.style.width = `${size}px`;
+    thumb.style.transform = `translateX(${max ? (tl.scrollLeft / max) * (w - size) : 0}px)`;
+    wrap.classList.toggle("fade-l", tl.scrollLeft > 4);
+    wrap.classList.toggle("fade-r", tl.scrollLeft < max - 4);
+  };
+  const queueRail = () => { if (!railFrame) railFrame = requestAnimationFrame(drawRail); };
+  tl.addEventListener("scroll", queueRail, { passive: true });
+  window.addEventListener("resize", queueRail);
+  const railTo = (clientX, grabOffset) => {
+    const r = rail.getBoundingClientRect(), size = thumb.offsetWidth;
+    const frac = Math.max(0, Math.min(1, (clientX - r.left - grabOffset) / Math.max(1, r.width - size)));
+    return frac * maxLeft();
+  };
+  rail.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    clearFocus(); clearTimeout(settleTimer);
+    tl.classList.add("stepping");
+    const onThumb = e.target === thumb;
+    const grab = onThumb ? e.clientX - thumb.getBoundingClientRect().left : thumb.offsetWidth / 2;
+    rail.setPointerCapture(e.pointerId);
+    rail.classList.add("active");
+    if (!onThumb) glide(railTo(e.clientX, grab));
+    const move = (ev) => { stopGlide(); tl.scrollLeft = railTo(ev.clientX, grab); target = tl.scrollLeft; };
+    const up = () => {
+      rail.removeEventListener("pointermove", move);
+      rail.classList.remove("active");
+      settle(80);
+    };
+    rail.addEventListener("pointermove", move);
+    rail.addEventListener("pointerup", up, { once: true });
+    rail.addEventListener("pointercancel", up, { once: true });
+  });
+
+  requestAnimationFrame(() => {
+    const t = $("#tl-today", tl);
+    if (t && desktop()) tl.scrollLeft = Math.max(0, t.offsetLeft - (compact ? 260 : 320));
+    target = tl.scrollLeft;
+    drawRail();
+  });
+  return { el: wrap, arrows: null };
 }
 
 function tlItem(ev, now) {
@@ -150,7 +207,7 @@ function tlItem(ev, now) {
   return item;
 }
 
-function enableDrag(el, onStart = () => {}) {
+function enableDrag(el, onStart = () => {}, onEnd = () => {}) {
   let down = null, moved = false;
   el.addEventListener("pointerdown", (e) => {
     if (e.pointerType !== "mouse" || e.button !== 0 || window.innerWidth <= 720) return;
@@ -159,10 +216,13 @@ function enableDrag(el, onStart = () => {}) {
   window.addEventListener("pointermove", (e) => {
     if (!down) return;
     const dx = e.clientX - down.x;
-    if (Math.abs(dx) > 5 && !moved) { moved = true; el.classList.add("dragging"); onStart(); }
+    if (Math.abs(dx) > 5 && !moved) { moved = true; el.classList.add("dragging"); onStart(); down.left = el.scrollLeft + dx; }
     if (moved) el.scrollLeft = down.left - dx;
   });
-  window.addEventListener("pointerup", () => { down = null; setTimeout(() => el.classList.remove("dragging"), 0); });
+  window.addEventListener("pointerup", () => {
+    if (down && moved) onEnd();
+    down = null; setTimeout(() => el.classList.remove("dragging"), 0);
+  });
   el.addEventListener("click", (e) => { if (moved) { e.preventDefault(); e.stopPropagation(); moved = false; } }, true);
 }
 
@@ -424,6 +484,17 @@ function calButtons(ev) {
 }
 
 // ---------- sign-up sheet ----------
+const servingsText = (n) => `about ${n} serving${n === 1 ? "" : "s"}`;
+
+function sheetMeter(sheet) {
+  if (sheet.closed) return "Closed";
+  const parts = [];
+  if (sheet.servings) parts.push(h("b", servingsText(sheet.servings).replace(/^a/, "A")), sheet.event?.going ? ` for ${sheet.event.going} going` : "");
+  else if (sheet.capacity) parts.push(`${sheet.filled} of ${sheet.capacity} filled`);
+  else parts.push(plural(sheet.people, "person", "people") + " signed up");
+  return parts;
+}
+
 export function sheetView(sheet, { past = false, showEvent = false } = {}) {
   const wrap = h("div.sheet", { id: `sheet-${sheet.id}` });
   const draw = () => {
@@ -435,17 +506,21 @@ export function sheetView(sheet, { past = false, showEvent = false } = {}) {
         h("div", ed(h("h2.h3", sheet.title), { label: "Sign-up title", save: (t) => patch({ title: t }) }),
           sheet.description || EDIT.on ? ed(h("p", sheet.description || ""), { label: "Sign-up note", placeholder: "Note", save: (t) => patch({ description: t }) }) : null,
           showEvent && sheet.event ? h("p", link(`/events/${sheet.event.slug}`, { class: "text-link" }, sheet.event.title)) : null),
-        h("div.sheet-meter", sheet.closed ? "Closed" : `${sheet.filled} of ${sheet.capacity} filled`)),
+        h("div.sheet-meter", sheetMeter(sheet))),
       h("div.slots", sheet.slots.map((sl) => slotRow(sheet, sl, open, draw)),
         EDIT.on ? h("div.slot.ed-add", action("Add a slot", async () => {
           const v = await ask("Add a slot", [{ name: "title", label: "Slot", attrs: { required: true, placeholder: "Dessert" } },
-            { name: "capacity", label: "How many people", type: "number", value: 1, attrs: { min: 1, max: 999, required: true } },
-            { name: "ask_item", label: "Ask what they're bringing", type: "check" }], { ok: "Add" });
+            { name: "capacity", label: "How many people (0 for no limit)", type: "number", value: 1, attrs: { min: 0, max: 999, required: true } },
+            { name: "ask_item", label: "Ask what they're bringing", type: "check" },
+            { name: "ask_servings", label: "Ask how many it feeds", type: "check" }], { ok: "Add" });
           if (!v) return;
           try {
             const r = await api(`/api/admin/sheets/${sheet.id}/slots`, { method: "POST", body: v });
-            sheet.slots.push({ id: r.id, title: v.title, note: "", capacity: Number(v.capacity), taken: 0, left: Number(v.capacity), ask_item: v.ask_item, people: [] });
-            sheet.capacity += Number(v.capacity); draw();
+            const cap = Number(v.capacity);
+            const at = sheet.slots.findIndex((x) => x.is_other);
+            sheet.slots.splice(at < 0 ? sheet.slots.length : at, 0, { id: r.id, title: v.title, note: "", capacity: cap, unlimited: !cap, taken: 0, left: cap || 999,
+              ask_item: v.ask_item, ask_servings: v.ask_servings, servings: 0, image: null, people: [] });
+            sheet.capacity += cap; draw();
           } catch (e) { toast(e.message, "error"); }
         })) : null));
   };
@@ -454,14 +529,23 @@ export function sheetView(sheet, { past = false, showEvent = false } = {}) {
 }
 
 function slotRow(sheet, sl, open, redraw) {
-  const row = h("div.slot");
-  const pips = sl.capacity <= 16
+  const row = h("div.slot", { class: (sl.is_other ? "other " : "") + (sl.image ? "has-img" : "") });
+  const limited = !sl.unlimited;
+  const pips = !limited ? null : sl.capacity <= 16
     ? h("div.pips", { "aria-hidden": "true" }, Array.from({ length: sl.capacity }, (_, i) => h("i", { class: i < sl.taken ? "" : "free" })))
     : h("div.fill-meter", { style: { textAlign: "left" } }, h("div.bar", h("span", { style: { width: `${(sl.taken / sl.capacity) * 100}%` } })));
-  const people = sl.people?.length ? h("div.slot-people", sl.people.map((p) => h("span", p.name, p.item ? h("em", ` (${p.item})`) : null, p.qty > 1 ? ` ×${p.qty}` : null))) : null;
+  const count = [limited ? (sl.left ? `${sl.taken} of ${sl.capacity}` : `All ${sl.capacity} filled`) : sl.taken ? `${sl.taken} bringing` : "",
+    sl.servings ? servingsText(sl.servings) : ""].filter(Boolean).join(", ");
+  // What people are bringing is public, laid out like a menu, so everyone can see the spread.
+  const withItems = (sl.people || []).filter((p) => p.item);
+  const dishes = withItems.length ? h("div.dishes", withItems.map((p) => h("div.dish",
+    h("b", p.item),
+    h("span", [p.name, p.servings ? `feeds ${p.servings}` : "", p.qty > 1 ? `×${p.qty}` : ""].filter(Boolean).join(", "))))) : null;
+  const names = (sl.people || []).filter((p) => !p.item && p.name);
+  const people = names.length ? h("div.slot-people", names.map((p) => h("span", p.name, p.qty > 1 ? ` ×${p.qty}` : null))) : null;
   const formHost = h("div.slot-form");
   const btn = !open ? null : sl.left > 0
-    ? h("button.btn.small", { type: "button", "aria-expanded": "false", onclick: () => toggle() }, "Sign up")
+    ? h("button.btn.small", { class: sl.is_other ? "ghost" : "", type: "button", "aria-expanded": "false", onclick: () => toggle() }, sl.is_other ? "Add yours" : "Sign up")
     : h("span.full-label", "Full");
   function toggle() {
     const isOpen = formHost.childElementCount > 0;
@@ -473,18 +557,22 @@ function slotRow(sheet, sl, open, redraw) {
     const form = h("form",
       field("Name", input("name", { autocomplete: "name", value: known.name || "", required: true })),
       field("Email", input("email", { type: "email", autocomplete: "email", value: known.email || "", required: true })),
-      sl.ask_item ? field("What are you bringing?", input("item", { required: true, placeholder: sl.note || "" })) : null,
-      sl.left > 1 ? field("How many", h("select", { name: "qty" }, Array.from({ length: Math.min(sl.left, 10) }, (_, i) => h("option", { value: i + 1 }, i + 1)))) : null,
+      sl.ask_item || sl.is_other ? field("What are you bringing?", input("item", { required: true, maxlength: 120, placeholder: sl.is_other ? "Kalua pig" : sl.note || "" })) : null,
+      sl.ask_servings ? field("Feeds about", input("servings", { type: "number", min: 1, max: 500, inputmode: "numeric", required: true, placeholder: "12" }),
+        { hintText: "Roughly how many people your dish will feed. It helps us see if there's enough of everything." }) : null,
+      limited && sl.left > 1 ? field("How many", h("select", { name: "qty" }, Array.from({ length: Math.min(sl.left, 10) }, (_, i) => h("option", { value: i + 1 }, i + 1)))) : null,
       honeypot(),
       h("button.btn", { type: "submit" }, "Sign up"),
       h("p.form-error"));
     onSubmit(form, async (v) => {
-      const res = await api(`/api/slots/${sl.id}/signup`, { method: "POST", body: v });
+      await api(`/api/slots/${sl.id}/signup`, { method: "POST", body: v });
       me.set({ name: v.name, email: v.email });
-      const qty = Number(v.qty || 1);
-      sl.taken += qty; sl.left -= qty; sheet.filled += qty;
-      (sl.people ||= []).push({ name: v.name.split(" ")[0] + (v.name.split(" ")[1] ? " " + v.name.split(" ").pop()[0] + "." : ""), item: v.item || "", qty });
-      toast(`You're signed up for ${sl.title}`);
+      const qty = Number(v.qty || 1), serves = Number(v.servings || 0);
+      sl.taken += qty; if (limited) { sl.left -= qty; sheet.filled += qty; }
+      sl.servings += serves; sheet.servings = (sheet.servings || 0) + serves; sheet.people = (sheet.people || 0) + qty;
+      const parts = v.name.trim().split(/\s+/);
+      (sl.people ||= []).push({ name: sheet.show_names ? parts[0] + (parts.length > 1 ? " " + parts.at(-1)[0] + "." : "") : "", item: v.item || "", qty, servings: serves || null });
+      toast(sl.is_other ? "Thanks! You're on the list." : `You're signed up for ${sl.title}`);
       redraw();
     });
     formHost.append(form);
@@ -492,22 +580,35 @@ function slotRow(sheet, sl, open, redraw) {
   }
   const slotPatch = (body) => api(`/api/admin/slots/${sl.id}`, { method: "PATCH", body });
   const editTools = EDIT.on ? h("span.ed-tools",
-    tool("people", "Change how many", async () => {
-      const v = await ask(`How many for ${sl.title}?`, [{ name: "capacity", label: "People", type: "number", value: sl.capacity, attrs: { min: Math.max(1, sl.taken), max: 999, required: true } }]);
-      if (!v) return;
-      try { await slotPatch({ capacity: Number(v.capacity) }); sheet.capacity += Number(v.capacity) - sl.capacity; sl.capacity = Number(v.capacity); sl.left = sl.capacity - sl.taken; redraw(); toast("Saved"); }
-      catch (e) { toast(e.message, "error"); }
+    sl.is_other ? null : tool("image", sl.image ? "Change picture" : "Add a picture", async () => {
+      try { const p = await pickImage(); await slotPatch({ photo_id: p.id }); sl.image = p; sl.photo_id = p.id; redraw(); toast("Saved"); }
+      catch (e) { if (e.message !== "No photo chosen.") toast(e.message, "error"); }
     }),
-    sl.taken ? null : tool("trash", `Remove ${sl.title}`, async () => {
-      try { await api(`/api/admin/slots/${sl.id}`, { method: "DELETE" }); sheet.slots.splice(sheet.slots.indexOf(sl), 1); sheet.capacity -= sl.capacity; redraw(); }
+    sl.image ? tool("close", "Remove picture", async () => { await slotPatch({ photo_id: null }); sl.image = null; sl.photo_id = null; redraw(); }) : null,
+    sl.is_other ? null : tool("people", "Change how many", async () => {
+      const v = await ask(`How many for ${sl.title}?`, [{ name: "capacity", label: "People (0 for no limit)", type: "number", value: sl.capacity, attrs: { min: 0, max: 999, required: true } }]);
+      if (!v) return;
+      try {
+        await slotPatch({ capacity: Number(v.capacity) });
+        const cap = Number(v.capacity);
+        if (limited) { sheet.capacity -= sl.capacity; sheet.filled -= sl.taken; }
+        sl.capacity = cap; sl.unlimited = cap === 0; sl.left = cap ? cap - sl.taken : 999;
+        if (cap) { sheet.capacity += cap; sheet.filled += sl.taken; }
+        redraw(); toast("Saved");
+      } catch (e) { toast(e.message, "error"); }
+    }),
+    sl.taken || sl.is_other ? null : tool("trash", `Remove ${sl.title}`, async () => {
+      try { await api(`/api/admin/slots/${sl.id}`, { method: "DELETE" }); sheet.slots.splice(sheet.slots.indexOf(sl), 1); if (limited) sheet.capacity -= sl.capacity; redraw(); }
       catch (e) { toast(e.message, "error"); }
     })) : null;
+  const title = sl.is_other ? h("span", sl.title) : ed(h("span", sl.title), { label: "Slot name", save: async (t) => { await slotPatch({ title: t }); sl.title = t; } });
   row.append(
     h("div.slot-row",
-      h("div.slot-title", ed(h("span", sl.title), { label: "Slot name", save: async (t) => { await slotPatch({ title: t }); sl.title = t; } }), sl.starts_at ? h("small", timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : sl.note && !sl.ask_item ? h("small", sl.note) : null),
-      h("div.slot-fill", pips, h("div.slot-count", sl.left ? `${sl.taken} of ${sl.capacity}` : `All ${sl.capacity} filled`), people),
+      sl.image ? h("div.slot-img", h("img", { src: media(sl.image.thumb), alt: "", loading: "lazy" })) : null,
+      h("div.slot-title", title, sl.starts_at ? h("small", timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : sl.note && !sl.ask_item ? h("small", sl.note) : null),
+      h("div.slot-fill", pips, count ? h("div.slot-count", count) : null, people),
       EDIT.on ? editTools : btn),
-    formHost);
+    ...[dishes, formHost].filter(Boolean));
   return row;
 }
 

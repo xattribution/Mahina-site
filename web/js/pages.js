@@ -67,7 +67,7 @@ export async function home() {
       const narrow = window.innerWidth <= 720;
       const tl = timeline(narrow ? live.filter((e) => parse(e.starts_at) > now).slice(0, 5) : live.slice(-14), { compact: true });
       return h("section.section",
-        h("div.wrap", h("div.section-head", heading("coming"), h("div.row", tools("coming"), tl.arrows || null, link("/events", { class: "btn small ghost" }, "All events")))),
+        h("div.wrap", h("div.section-head", heading("coming"), h("div.row", tools("coming"), link("/events", { class: "btn small ghost" }, "All events")))),
         tl.el || tl);
     },
     photos() {

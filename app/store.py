@@ -113,8 +113,8 @@ def events_out(rows, admin=False):
     sheet_counts = {r["event_id"]: r for r in db.q(
         """SELECT sh.event_id, COUNT(DISTINCT sl.id) slots, COALESCE(SUM(sl.capacity),0) cap,
            (SELECT COALESCE(SUM(sg.qty),0) FROM signups sg JOIN slots s2 ON s2.id=sg.slot_id JOIN sheets h2 ON h2.id=s2.sheet_id
-            WHERE h2.event_id=sh.event_id) filled
-           FROM sheets sh JOIN slots sl ON sl.sheet_id=sh.id WHERE sh.event_id IS NOT NULL AND sh.status='open'
+            WHERE h2.event_id=sh.event_id AND h2.status='open' AND s2.capacity > 0) filled
+           FROM sheets sh JOIN slots sl ON sl.sheet_id=sh.id WHERE sh.event_id IS NOT NULL AND sh.status='open' AND sl.capacity > 0
            GROUP BY sh.event_id""")}
     out = []
     for r in rows:
@@ -151,29 +151,63 @@ def event_detail(ev, admin=False):
 
 # ---------- sheets ----------
 
+OTHER_TITLE = "Something else"
+
+
 def sheet_out(s, admin=False):
-    slots = db.q("SELECT * FROM slots WHERE sheet_id=? ORDER BY sort, starts_at, id", (s["id"],))
+    """A sign-up sheet. What people are bringing is always public, so everyone can see the spread.
+    Names show as first name and last initial, and only when the sheet allows it. Emails never leave the admin side.
+    A slot with capacity 0 has no limit on how many people sign up."""
+    slots = db.q("SELECT * FROM slots WHERE sheet_id=? ORDER BY is_other, sort, starts_at, id", (s["id"],))
+    photo_ids = [sl["photo_id"] for sl in slots if sl.get("photo_id")]
+    photos = {p["id"]: photo_out(p) for p in db.q(
+        f"SELECT * FROM photos WHERE id IN ({','.join('?' * len(photo_ids))})", tuple(photo_ids))} if photo_ids else {}
     out_slots = []
     for sl in slots:
+        if sl["is_other"] and not s["allow_other"] and not db.one("SELECT 1 FROM signups WHERE slot_id=?", (sl["id"],)):
+            continue
         ups = db.q("SELECT * FROM signups WHERE slot_id=? ORDER BY id", (sl["id"],))
         taken = sum(u["qty"] for u in ups)
-        item = {"id": sl["id"], "title": sl["title"], "note": sl["note"], "capacity": sl["capacity"],
+        cap = sl["capacity"] or 0
+        item = {"id": sl["id"], "title": sl["title"], "note": sl["note"], "capacity": cap, "unlimited": cap == 0,
                 "starts_at": sl["starts_at"], "ends_at": sl["ends_at"], "ask_item": bool(sl["ask_item"]),
-                "taken": taken, "left": max(0, sl["capacity"] - taken)}
+                "ask_servings": bool(sl["ask_servings"]), "is_other": bool(sl["is_other"]),
+                "photo_id": sl["photo_id"], "image": photos.get(sl["photo_id"]),
+                "taken": taken, "left": 999 if cap == 0 else max(0, cap - taken),
+                "servings": sum(u["servings"] or 0 for u in ups)}
         if admin:
-            item["signups"] = [{k: u[k] for k in ("id", "name", "email", "phone", "qty", "item", "created")} for u in ups]
-        elif s["show_names"]:
-            item["people"] = [{"name": short_name(u["name"]), "item": u["item"], "qty": u["qty"]} for u in ups]
+            item["signups"] = [{k: u[k] for k in ("id", "name", "email", "phone", "qty", "item", "servings", "created")} for u in ups]
+        else:
+            item["people"] = [{"name": short_name(u["name"]) if s["show_names"] else "", "item": u["item"], "qty": u["qty"],
+                               "servings": u["servings"]} for u in ups]
         out_slots.append(item)
     closed = s["status"] != "open" or (s["closes_at"] and s["closes_at"] < db.now_iso())
+    limited = [x for x in out_slots if not x["unlimited"]]
     o = {"id": s["id"], "event_id": s["event_id"], "title": s["title"], "description": s["description"],
          "status": s["status"], "closes_at": s["closes_at"], "closed": bool(closed), "show_names": bool(s["show_names"]),
-         "slots": out_slots, "filled": sum(x["taken"] for x in out_slots),
-         "capacity": sum(x["capacity"] for x in out_slots)}
+         "allow_other": bool(s["allow_other"]), "slots": out_slots,
+         "filled": sum(x["taken"] for x in limited), "capacity": sum(x["capacity"] for x in limited),
+         "people": sum(x["taken"] for x in out_slots), "servings": sum(x["servings"] for x in out_slots)}
     if s["event_id"]:
         ev = db.one("SELECT slug, title, starts_at, location FROM events WHERE id=?", (s["event_id"],))
+        if ev:
+            ev["going"] = going_count(s["event_id"])
         o["event"] = ev
     return o
+
+
+def ensure_other_slot(sheet_id, on):
+    """The "Something else" slot lets people bring what isn't on the list. Turning it off keeps it while people are in it."""
+    other = db.one("SELECT id FROM slots WHERE sheet_id=? AND is_other=1", (sheet_id,))
+    if on and not other:
+        asks = db.one("SELECT MAX(ask_servings) a FROM slots WHERE sheet_id=? AND is_other=0", (sheet_id,))["a"] or 0
+        db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, ask_servings, is_other, sort) VALUES (?,?,0,1,?,1,9999)",
+               (sheet_id, OTHER_TITLE, asks))
+    elif on and other:
+        asks = db.one("SELECT MAX(ask_servings) a FROM slots WHERE sheet_id=? AND is_other=0", (sheet_id,))["a"] or 0
+        db.run("UPDATE slots SET ask_servings=? WHERE id=?", (asks, other["id"]))
+    elif not on and other and not db.one("SELECT 1 FROM signups WHERE slot_id=?", (other["id"],)):
+        db.run("DELETE FROM slots WHERE id=?", (other["id"],))
 
 
 def my_token(email):
@@ -200,19 +234,29 @@ def signup(slot_id, body):
     if sheet["status"] != "open" or (sheet["closes_at"] and sheet["closes_at"] < db.now_iso()):
         raise Invalid("This sign-up is closed.")
     name, email = need_name(body.get("name")), need_email(body.get("email"))
-    qty = max(1, min(int(body.get("qty") or 1), 50))
+    if slot["is_other"] and not sheet["allow_other"]:
+        raise Invalid("This sign-up isn't taking other items.")
+    qty = max(1, min(int(body.get("qty") or 1), 50)) if slot["capacity"] else 1
     item = clean(body.get("item"), 120)
-    if slot["ask_item"] and not item:
+    if (slot["ask_item"] or slot["is_other"]) and not item:
         raise Invalid("Tell everyone what you're bringing.", "item")
-    taken = db.one("SELECT COALESCE(SUM(qty),0) n FROM signups WHERE slot_id=?", (slot_id,))["n"]
-    if taken + qty > slot["capacity"]:
-        left = slot["capacity"] - taken
-        raise Invalid("This slot just filled up." if left <= 0 else f"Only {left} left in this slot.", "qty")
+    servings = None
+    if slot["ask_servings"]:
+        raw = str(body.get("servings") or "").strip()
+        if not raw.isdigit() or not 1 <= int(raw) <= 500:
+            raise Invalid("About how many people will it feed? Enter a number.", "servings")
+        servings = int(raw)
+    if slot["capacity"]:
+        taken = db.one("SELECT COALESCE(SUM(qty),0) n FROM signups WHERE slot_id=?", (slot_id,))["n"]
+        if taken + qty > slot["capacity"]:
+            left = slot["capacity"] - taken
+            raise Invalid("This slot just filled up." if left <= 0 else f"Only {left} left in this slot.", "qty")
     tok = my_token(email)
-    sid = db.run("INSERT INTO signups(slot_id, name, email, phone, qty, item, token, created) VALUES (?,?,?,?,?,?,?,?)",
-                 (slot_id, name, email, clean(body.get("phone"), 30), qty, item, tok, db.now_iso()))
+    sid = db.run("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, token, created) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (slot_id, name, email, clean(body.get("phone"), 30), qty, item, servings, tok, db.now_iso()))
     ev = db.one("SELECT * FROM events WHERE id=?", (sheet["event_id"],)) if sheet["event_id"] else None
-    rows = [("Sign-up", sheet["title"]), ("Slot", slot["title"] + (f" ×{qty}" if qty > 1 else "")), ("Bringing", item)]
+    rows = [("Sign-up", sheet["title"]), ("Slot", slot["title"] + (f" ×{qty}" if qty > 1 else "")), ("Bringing", item),
+            ("Serves", f"About {servings}" if servings else "")]
     if slot["starts_at"]:
         rows.append(("Time", fmt_slot_time(slot)))
     if ev:
