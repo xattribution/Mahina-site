@@ -278,6 +278,54 @@ async function eventEditor(id) {
   return page;
 }
 
+// Starting points for a new event, and common sentences for any event. Plain club voice, easy to edit.
+const EVENT_TEMPLATES = [
+  { label: "Potluck", title: "ʻOhana Potluck", summary: "Bring a dish to share. The club covers drinks and plates.",
+    details: "Come hungry and bring a dish to share. Sign up below for a main, side, or dessert so we get a good spread.\n\nThe club provides drinks, plates, and utensils. Families and keiki are welcome.\n\nRSVP so we know how much food to plan for." },
+  { label: "Holiday party", title: "Holiday Party", summary: "Dinner, keiki gifts, and a white elephant exchange.",
+    details: "Join us for dinner and the holiday celebration. Spouses, families, and keiki are welcome.\n\nWhite elephant: bring one wrapped gift, about $20, if you want to play.\n\nRSVP with your guest count so we can plan food and gifts." },
+  { label: "Pau hana", title: "Pau Hana", summary: "End the week together. Drinks and pūpū provided.",
+    details: "Pau hana after work. Drinks and pūpū provided while they last.\n\nCome as you are, and bring someone who's new to the unit." },
+  { label: "Volunteer", title: "Community Service Day", summary: "A few hours giving back. Gloves and water provided.",
+    details: "We're giving back to the community. Gloves, bags, and water are provided.\n\nWear closed-toe shoes, a hat, and sunscreen. Sign up for a shift below so we can plan the crew." },
+  { label: "Sports", title: "Volleyball Tournament", summary: "Teams of six. All skill levels welcome.",
+    details: "Bring a team or come solo and we'll place you. All skill levels welcome.\n\nBring water, sunscreen, and a chair for the sidelines." },
+  { label: "Fundraiser", title: "Fundraiser", summary: "Every dollar goes to the holiday party fund.", donate: true,
+    details: "Help us raise money for the club. Every dollar goes to the holiday party fund and keiki gifts.\n\nYou can chip in on Venmo with the QR code on this page." },
+  { label: "Farewell", title: "Aloha ʻOe Farewell", summary: "Send off our departing Guardians and families.",
+    details: "Come say aloha to the Guardians and families heading to their next assignment.\n\nPūpū provided. Feel free to bring a dish to share." },
+];
+const SNIPPETS = [
+  ["RSVP", "RSVP so we know how much food to plan for."],
+  ["Bring a dish", "Sign up below to bring a dish so we get a good mix of mains, sides, and desserts."],
+  ["Club provides", "The club provides drinks, plates, and utensils."],
+  ["Families welcome", "Families and keiki are welcome."],
+  ["Guests welcome", "Spouses and guests are welcome. Add them to your RSVP."],
+  ["Base access", "Guests without base access: send their full names to the club email at least three days ahead for a visitor pass."],
+  ["What to bring", "Bring a chair, sunscreen, and water."],
+  ["Shoes", "Wear closed-toe shoes."],
+  ["Parking", "Parking is limited, so carpool if you can."],
+  ["Rain or shine", "Rain or shine."],
+  ["Free", "Free for members and families."],
+  ["Questions", "Questions? Send us a note on the Contact page."],
+];
+
+function snippetMenu(textarea) {
+  const pick = h("select.snippet", { "aria-label": "Insert common text", onchange: (e) => {
+    const text = e.target.value;
+    e.target.value = "";
+    if (!text) return;
+    const { selectionStart: a = textarea.value.length, selectionEnd: b = a, value } = textarea;
+    const before = value.slice(0, a).replace(/\s+$/, ""), after = value.slice(b);
+    const glue = before ? (before.endsWith("\n") ? "" : "\n\n") : "";
+    textarea.value = before + glue + text + after;
+    const at = (before + glue + text).length;
+    textarea.focus(); textarea.setSelectionRange(at, at);
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  } }, h("option", { value: "" }, "Insert…"), SNIPPETS.map(([label, text]) => h("option", { value: text }, label)));
+  return pick;
+}
+
 function eventForm(ev, allTags) {
   const e = ev || { title: "", starts_at: "", ends_at: "", location: "", map_url: "", summary: "", description: "", status: "published",
     rsvp_enabled: true, capacity: null, reminders: [24], tag_ids: [], cover: null, cover_photo_id: null, all_day: false };
@@ -310,7 +358,21 @@ function eventForm(ev, allTags) {
   drawStatus();
   const [sd, stime] = (e.starts_at || "").split("T");
   const [ed, etime] = (e.ends_at || "").split("T");
+  const details = h("textarea", { name: "description", rows: 7 }, e.description || "");
+  const detailsField = field("Details", details);
+  detailsField.querySelector(".field-label").append(snippetMenu(details));
+  const starters = ev ? null : h("div.starters", { role: "group", "aria-label": "Start from" },
+    h("span.field-label", "Start from", hint("Fills in a title, summary, and details you can edit. Pick Blank to start empty.")),
+    h("div.starter-row", [...EVENT_TEMPLATES, { label: "Blank", title: "", summary: "", details: "" }].map((t) =>
+      h("button", { type: "button", "aria-pressed": "false", onclick: (x) => {
+        $$(".starter-row button", form).forEach((b) => b.setAttribute("aria-pressed", String(b === x.currentTarget)));
+        const titleIn = $("[name=title]", form);
+        titleIn.value = t.title; $("[name=summary]", form).value = t.summary; details.value = t.details;
+        const don = $("[name=donate]", panel); if (don) don.checked = !!t.donate;
+        titleIn.focus(); titleIn.select();
+      } }, t.label))));
   const form = h("form",
+    starters,
     field("Title", input("title", { value: e.title, required: true, placeholder: "ʻOhana Potluck" })),
     h("div.two", field("Date", input("date", { type: "date", value: sd || "", required: true })),
       h("div.two", field("Starts", input("start", { type: "time", value: stime || "", step: 300 })), field("Ends", input("end", { type: "time", value: etime || "", step: 300 }), { optional: true }))),
@@ -318,7 +380,7 @@ function eventForm(ev, allTags) {
     h("div.two", field("Place", input("location", { value: e.location, placeholder: "Hickam Beach, Pavilion 3" })),
       field("Map link", input("map_url", { type: "url", value: e.map_url, placeholder: "https://maps.google.com/..." }), { optional: true, hintText: "Leave blank and the site links to a map search for the place." })),
     field("Summary", input("summary", { value: e.summary, maxlength: 240 }), { hintText: "One line. Shows on the timeline and in emails." }),
-    field("Details", h("textarea", { name: "description", rows: 7 }, e.description || "")),
+    detailsField,
     ev && ev.status === "published" ? h("label.check", h("input", { type: "checkbox", name: "notify_change" }), "Email attendees if the date, place, or status changes") : null,
     h("p.form-error"),
     null);

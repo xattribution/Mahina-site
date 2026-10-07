@@ -8,7 +8,6 @@ from collections import defaultdict, deque
 import segno
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 
 from . import db, mailer, media, store
 from .admin import router as admin_router
@@ -479,7 +478,45 @@ def media_file(name: str):
     return FileResponse(path, headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
-app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+# ---------- static files: versioned so a normal refresh always picks up an update ----------
+# Every file under web/ is hashed at startup. The page links to /static/v-<hash>/..., so after an update the
+# addresses change and browsers (and any proxy or CDN in front) fetch the new files. Those versioned files can
+# then be cached for a year, because their content never changes at that address. The page itself is never cached.
+def _build_id():
+    import hashlib
+    digest = hashlib.sha1()
+    for root, dirs, files in os.walk(WEB_DIR):
+        dirs.sort()
+        for f in sorted(files):
+            path = os.path.join(root, f)
+            digest.update(os.path.relpath(path, WEB_DIR).encode())
+            with open(path, "rb") as fh:
+                digest.update(fh.read())
+    return digest.hexdigest()[:10]
+
+
+BUILD = _build_id()
+with open(os.path.join(WEB_DIR, "index.html"), encoding="utf-8") as _fh:
+    INDEX_HTML = _fh.read().replace('"/static/', f'"/static/v-{BUILD}/')
+
+
+def _web_file(path):
+    full = os.path.realpath(os.path.join(WEB_DIR, path))
+    if not full.startswith(os.path.realpath(WEB_DIR) + os.sep) or not os.path.isfile(full):
+        raise HTTPException(404)
+    return full
+
+
+@app.get("/static/v-{ver}/{path:path}")
+def static_versioned(ver: str, path: str):
+    cache = "public, max-age=31536000, immutable" if ver == BUILD else "no-cache"
+    return FileResponse(_web_file(path), headers={"Cache-Control": cache})
+
+
+@app.get("/static/{path:path}")
+def static_plain(path: str):
+    """Old unversioned addresses still work, but browsers must check back every time."""
+    return FileResponse(_web_file(path), headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/admin", include_in_schema=False)
@@ -497,4 +534,4 @@ def old_admin_links(request: Request, rest: str = ""):
 def spa(path: str):
     if path.startswith("api/"):
         raise HTTPException(404)
-    return FileResponse(os.path.join(WEB_DIR, "index.html"), headers={"Cache-Control": "no-cache"})
+    return HTMLResponse(INDEX_HTML, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})

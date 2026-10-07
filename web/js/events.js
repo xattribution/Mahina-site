@@ -459,12 +459,12 @@ export function signupPopup({ title, sub, fields = [], submit = "Sign up", onSub
 function giveBlock(ev) {
   if (!ev.donate || !ev.venmo) return null;
   const qr = CFG.demo ? (window.MAHINA_DEMO.qr?.() || "") : `/api/events/${ev.slug}/give.svg`;
-  return h("div.ev-give",
+  return h("section.ev-give", { "aria-label": "Chip in" },
+    h("img.ev-give-qr", { src: qr, alt: `Venmo QR code for @${ev.venmo.handle}`, width: 96, height: 96 }),
     h("div.ev-give-text",
       h("h3", "Chip in"),
-      ev.donate_note ? h("p", ev.donate_note) : null,
-      h("a.btn.small.dark", { href: ev.venmo.link, target: "_blank", rel: "noopener" }, `Venmo @${ev.venmo.handle}`)),
-    h("img.ev-give-qr", { src: qr, alt: `Venmo QR code for @${ev.venmo.handle}`, width: 112, height: 112 }));
+      ev.donate_note && ev.donate_note.trim() !== ev.title.trim() ? h("p", ev.donate_note) : null,
+      h("a.ev-give-link", { href: ev.venmo.link, target: "_blank", rel: "noopener" }, `Venmo @${ev.venmo.handle}`, icon("right", 16))));
 }
 
 function rsvpPanel(ev) {
@@ -481,7 +481,7 @@ function rsvpPanel(ev) {
         h("p.muted", { style: { margin: 0 } }, done.already
           ? "We sent the link to change or cancel to your email again."
           : "Check your email for your confirmation and a link to change or cancel."),
-        h("div.cal-links", calButtons(ev))), giveBlock(ev) || "");
+        h("div.cal-links", calButtons(ev))));
       return;
     }
     const full = ev.capacity && ev.spots_left <= 0;
@@ -506,9 +506,8 @@ function rsvpPanel(ev) {
       h("button.btn.block", { type: "button", disabled: full, onclick: open }, full ? "Full" : "I'm going"));
   };
   draw(null);
-  const give = giveBlock(ev);
-  if (give) box.append(give);
-  return box;
+  // The RSVP card and the donation block sit apart, so neither feels crowded.
+  return h("div.ev-side", box, giveBlock(ev));
 }
 
 function calButtons(ev) {

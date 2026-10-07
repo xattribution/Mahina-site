@@ -363,3 +363,12 @@ form .seg .hint { margin: 0 8px 0 6px; }
 .roster .who .qty { font-weight: 800; color: var(--ink); }
 .roster .who > a { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 700px) { .roster .who { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 40px 36px; } .roster .who > :nth-child(2), .roster .who > :nth-child(5) { display: none; } }
+
+/* event starters and snippets */
+.starters { display: grid; gap: 8px; margin-bottom: 4px; }
+.starter-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.starter-row button { height: 34px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--line-2); background: #fff; font-weight: 650; font-size: 14px; color: var(--text); cursor: pointer; }
+.starter-row button:hover { border-color: var(--ink); color: var(--ink); }
+.starter-row button[aria-pressed="true"] { background: var(--night); border-color: var(--night); color: #fff; }
+.field-label .snippet { margin-left: auto; height: 30px; padding: 0 28px 0 10px; font-size: 13px; font-weight: 650; border: 1px solid var(--line-2); border-radius: 8px; background-color: #fff; color: var(--ink); cursor: pointer; width: auto; }
+.field-label:has(.snippet) { display: flex; align-items: center; gap: 4px; }

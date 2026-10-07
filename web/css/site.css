@@ -852,7 +852,14 @@ body.admin-mode .edit-bar { display: none; }
 @media (max-width: 520px) { .modal { padding: 24px 20px; } }
 
 /* ---------- event donations ---------- */
-.ev-give { display: grid; grid-template-columns: minmax(0, 1fr) 112px; gap: 16px; align-items: center; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line-2); }
-.ev-give h3 { font-size: 18px; margin-bottom: 4px; }
-.ev-give p { font-size: 14px; color: var(--muted); margin: 0 0 12px; }
-.ev-give-qr { width: 112px; height: 112px; background: #fff; padding: 8px; border-radius: var(--radius-img); }
+.ev-side { position: sticky; top: 92px; display: grid; gap: 14px; align-self: start; }
+.ev-side .rsvp { position: static; }
+.ev-give { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 18px; align-items: center; padding: 18px 20px; border: 1px solid var(--line); border-radius: 14px; }
+.ev-give h3 { font-size: 17px; margin: 0 0 2px; }
+.ev-give p { font-size: 14px; color: var(--muted); margin: 0 0 8px; line-height: 1.4; }
+.ev-give-qr { width: 96px; height: 96px; background: #fff; display: block; }
+.ev-give-link { display: inline-flex; align-items: center; gap: 4px; font-size: 14px; font-weight: 700; color: var(--ink); text-decoration: none; margin-top: 4px; }
+.ev-give-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+@media (max-width: 960px) { .ev-side { position: static; } }
+/* On a phone the QR is on the same screen, so offer the link instead. */
+@media (max-width: 720px) { .ev-give { grid-template-columns: 1fr; } .ev-give-qr { display: none; } }

@@ -36,6 +36,7 @@ It installs Docker if needed and asks three questions: the port, the public addr
 | Restore a backup | `sudo mahina restore <file>` |
 | Status, logs, restart | `sudo mahina status`, `sudo mahina logs`, `sudo mahina restart` |
 
+- **After an update**, a normal page refresh loads the new version. Script and style addresses change with every release, so browsers and proxies can't hold on to old copies.
 - **Update** never touches your data: the mailing list, sign-ups, email settings, and accounts carry over. It backs up your data first, downloads the latest version, and restarts. If the new version fails to start, it goes back to the previous one on its own. The last 10 backups are kept in `/opt/mahina-club/backups`.
 - **Uninstall** asks you to type `uninstall`, saves a final backup to your home folder, and removes the site. Docker stays installed. Add `--purge` to skip the backup, or `--yes` to skip the question.
 - **Settings** are in `/opt/mahina-club/.env`. Run `sudo mahina restart` after changing them. New settings from updates are added automatically, and your values are kept.
