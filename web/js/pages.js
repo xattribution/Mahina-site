@@ -578,7 +578,6 @@ export async function contact() {
 export async function mine({ token }) {
   setTitle("Your sign-ups");
   const data = await api(`/api/me/${token}`);
-  me.set({ name: data.name, email: data.email });
   const list = h("div.mine");
   const rows = [
     ...data.rsvps.filter((r) => r.status !== "no").map((r) => ({ kind: "rsvp", id: r.id, at: r.starts_at, title: r.title, slug: r.slug,

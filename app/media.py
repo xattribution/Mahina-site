@@ -2,10 +2,12 @@
 import io
 import os
 import secrets
+import threading
 
 from PIL import Image, ImageOps
 
-Image.MAX_IMAGE_PIXELS = 60_000_000  # refuse decompression bombs
+MAX_PIXELS = 40_000_000  # 40 megapixels: bigger than any phone photo, small enough to process safely
+Image.MAX_IMAGE_PIXELS = MAX_PIXELS  # Pillow's own bomb check as a backstop
 
 from . import db
 
@@ -14,13 +16,29 @@ MAX_THUMB = 720
 ALLOWED = {"JPEG", "PNG", "WEBP", "HEIF", "MPO", "GIF"}
 
 
-def save_image(data: bytes):
+PUBLIC_MAX_PIXELS = 24_000_000  # visitor uploads: still bigger than a 24 MP camera's photos
+_busy = threading.BoundedSemaphore(2)  # at most two images decode at once, so memory stays bounded under load
+
+
+def save_image(data: bytes, max_pixels=MAX_PIXELS):
+    with _busy:
+        return _save_image(data, max_pixels)
+
+
+def _save_image(data, max_pixels):
     try:
-        im = Image.open(io.BytesIO(data))
+        # Only these formats are even opened; anything else is refused without decoding.
+        im = Image.open(io.BytesIO(data), formats=("JPEG", "PNG", "WEBP", "GIF", "MPO") + (("HEIF",) if "HEIF" in Image.OPEN else ()))
         fmt = im.format
+        # Size comes from the file header, so oversized images are refused before any pixels are decoded.
+        if im.width * im.height > max_pixels:
+            raise Image.DecompressionBombError("too large")
+        if fmt == "JPEG":
+            im.draft("RGB", (MAX_WEB * 2, MAX_WEB * 2))  # decode big JPEGs at reduced size
         im = ImageOps.exif_transpose(im)
-    except Image.DecompressionBombError:
-        raise ValueError("That image is too large. Use one under 60 megapixels.")
+        im.thumbnail((MAX_WEB, MAX_WEB), Image.LANCZOS)  # shrink first, in the original mode, before any conversion
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+        raise ValueError(f"That image is too large. Use one under {max_pixels // 1_000_000} megapixels.")
     except Exception:
         raise ValueError("That file isn't an image we can read. Use JPG, PNG, or WebP.")
     if fmt not in ALLOWED:

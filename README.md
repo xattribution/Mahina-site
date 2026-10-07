@@ -97,18 +97,35 @@ New members start with Event planning. In **Planning**, anyone with access sees 
 
 ## Security
 
-- **Database queries:** every query is parameterized. Inputs are length-capped and stripped of control and bidirectional-override characters. Single-line fields like names and subjects can't carry line breaks into email headers or calendar files.
-- **Email addresses:** checked against a strict pattern, so an address is always safe to use in a header or a mailto link.
-- **Rendering:** user text is displayed as text, never as HTML. Email templates escape every value.
-- **Response headers:** a strict Content Security Policy that only runs the site's own scripts. Pages can't be framed, MIME types aren't sniffed, and HSTS turns on behind HTTPS.
-- **Request size:** request bodies are capped at 1 MB, and photo uploads at 200 MB.
-- **Photos:** every upload is decoded and re-saved as a fresh JPEG with metadata stripped. Oversized images are refused, so a crafted file can't pass through.
-- **Admin sessions:** session cookies are HttpOnly and SameSite=Strict, and only a hash of each session token is stored. Every admin write needs a custom header, which blocks cross-site requests.
-- **Change-or-cancel links:** they go only to the person's own inbox and are never shown on screen. If someone RSVPs again with an email that's already on the list, the original RSVP stays as it is and the owner gets their link again.
-- **Permissions:** every console request is checked on the server against the account's role and access, not just hidden in the menu. Names and emails only reach people with access to that area. The public site shows first names and last initials on sign-up sheets, and never shows emails.
-- **Removing people:** under **People**, the trash button deletes a person outright: mailing list entry, RSVPs, sign-ups, messages, queued emails, and their name on poll answers and shared photos. Anyone can do the same for themselves from the **Remove me** button on the unsubscribe page or their sign-ups page. Deleted rows are overwritten in the database file, not just unlinked.
-- **Stored data:** the database, uploads, and backups are readable only by the site's own user. Copies of sent emails are cleared after 90 days. CSV downloads are escaped so a name can't run as a spreadsheet formula.
-- **Spam:** public forms have a hidden honeypot field and per-address rate limits. Set `FORWARDED_ALLOW_IPS` to your proxy so the limits see real visitor addresses.
+Audited by three independent reviewers (server, shop and payments, browser), then re-attacked three times after fixes. Every confirmed attack is replayed by an automated test.
+
+**Payments and protected settings**
+- **Confirm it's you:** changing the club Venmo handle, the Venmo payment mailbox, or the email server, and any change to accounts (adding people, invites, roles, setting passwords, removing admins), needs a 6-digit code emailed to the signed-in admin. Before email is set up, or if the code email can't be sent, the admin's password works instead. A pass lasts 10 minutes, and confirming swaps the session cookie, so a copied cookie stops working. Codes are hashed, single-use, limited to 5 tries, and never stored in the outbox.
+- **Alerts:** every admin gets an email when the Venmo handle, payment mailbox, email server, or admin list changes. Email-server alerts go out through the old settings, and nobody can discard them from the outbox.
+- **Admins only:** members with the Shop permission can sell, mark orders paid, and edit products. They can't change any payment setting or cancel a paid order. Admins need a reason to cancel a paid order.
+- **Orders:** prices and totals are always worked out on the server. Online orders always start unpaid. Unpaid online orders release their items after 24 hours, and can hold at most 10 of an item, 20 items in all, and half of what's left of any item, with at most 3 open per email address and per network.
+- **Automatic Venmo matching** marks an order paid only when all of these hold:
+  - the receiving mail server's own check shows DKIM and DMARC passing for venmo.com;
+  - the email went to the club's Venmo address;
+  - the subject is a received payment for the exact order total (the amount is never read from the payer's note);
+  - it names exactly one order code;
+  - that email hasn't paid for anything before.
+  The mailbox is read only, and scanned in order from where the last check stopped, so a flood of look-alike mail can't hide a real payment.
+
+**Accounts and sign-in**
+- Argon2id passwords, 15 characters minimum. Sign-in attempts are counted before the password is checked: 8 per device per account, 30 per device, and 40 per account from new devices, every 15 minutes. Someone failing on purpose can't lock the real person out of a device they've used before.
+- Session cookies are HttpOnly and SameSite=Strict, and only a hash of each token is stored. Every dashboard write needs a custom header, which blocks cross-site requests. Single sign-on accepts verified emails only.
+- Every dashboard request is checked on the server against the account's role and access. Team invites and people's private links are hidden or blanked out in the outbox.
+
+**Everything else**
+- **Injection:** every database query is parameterized. Inputs are length-capped and stripped of control and bidirectional characters, so nothing can break into an email header or calendar file. User text is always shown as text, never HTML. CSV downloads are escaped so nothing runs as a spreadsheet formula. Links only accept web addresses or site paths.
+- **Headers:** a strict Content Security Policy that only runs the site's own scripts and only posts forms to the site. Pages can't be framed, and the server doesn't announce its software.
+- **Uploads:** 1 MB for normal requests; only the exact upload routes take more, and dashboard uploads need a session before anything is read. Images over 24 megapixels (40 for the team) are refused before decoding. At most two images process at once, off the main thread, and every image is re-saved as a fresh JPEG with metadata stripped.
+- **Privacy:** drafts never leak through sign-up sheets, polls, or photos. Typing someone's email never changes their RSVP; their own link goes to their inbox instead. Per-address limits stop the public forms from flooding anyone's inbox. Unsubscribe links need a click, so email scanners can't trigger them. Error replies never echo the request back.
+- **Removing people:** under **People**, the trash button deletes a person outright, including their name on shop orders and team emails about them. Anyone can do the same for themselves from the **Remove me** button. Deleted rows are overwritten in the database file.
+- **Stored data:** the database, uploads, and backups are readable only by the site's own user. Copies of sent emails are cleared after 90 days.
+- **Demo content** only ever goes into a brand-new site. Emptying a live site and restarting doesn't bring it back.
+- **Behind a proxy:** set `FORWARDED_ALLOW_IPS` to your proxy so rate limits see real visitors. If the proxy runs on the same machine, also set `MAHINA_BIND=127.0.0.1` so no one can reach the app around the proxy and fake their address.
 
 ## Email
 
@@ -129,8 +146,8 @@ Turn it on under **Shop > Settings**. Until then the page, its menu link, and it
 Every order gets a short code like `MC-7Q4K2`. The Venmo link and QR open Venmo with the club as recipient and the exact amount and code filled in as the note, so each payment can be matched to its order.
 
 - **At the table:** tap items on **Shop > Sell**, then **Venmo** (shows a QR for the buyer to scan) or **Cash** (works out change). Venmo sales flip to Paid on their own when automatic confirmation is on, or tap **They paid** after seeing the buyer's screen.
-- **Online:** orders wait for payment, then show under **To hand out** until someone marks them handed out. Unpaid orders cancel after 14 days and their items go back in stock.
-- **Automatic confirmation (optional):** in **Shop > Settings**, give the site read-only IMAP access to the mailbox that gets Venmo's "paid you" emails (for Gmail, an app password). Every few minutes, while orders are waiting, it reads the last 3 days of Venmo emails and marks an order paid only when the email passes the mail server's DKIM check for venmo.com, the code matches, and the amount is exact. A wrong amount leaves the order waiting with a note. It never changes or deletes email.
+- **Online:** orders wait for payment, then show under **To hand out** until someone marks them handed out. Unpaid orders are released after 24 hours, the buyer gets an email, and the items go back in stock. If a payment arrives later, the order comes back when the items are still there; otherwise admins are alerted.
+- **Automatic confirmation (optional):** in **Shop > Settings**, give the site read-only IMAP access to the mailbox that gets Venmo's "paid you" emails (for Gmail, an app password), and the email address on the club's Venmo account if it's different. Every few minutes, while orders are waiting, it reads new Venmo emails and marks an order paid only when every check under Security passes. A wrong amount leaves the order waiting with a note. It never changes or deletes email.
 - **Shop emails:** in **Shop > Settings**, set a sender name, a "send from" address, and a reply-to address just for order emails. Event, news, and list emails keep the club's usual address. The email service has to allow sending from that address (use one on the club's verified domain).
 - **Team alerts:** pick people under **Order alerts** to get an email when an online order comes in and when it's paid. Any order can also be sent by hand with the send button in **Orders**, with a note; replies go to whoever sent it, and the email links straight to that order. Only accounts that can see the shop are offered, since these emails include the buyer's name and email.
 - Venmo's rules expect a business or charity profile for selling goods. Check which kind the club's account is.

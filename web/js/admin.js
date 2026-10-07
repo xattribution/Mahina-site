@@ -39,7 +39,8 @@ async function refreshSite() { try { window.SITE = await api("/api/site"); } cat
 export async function render(path) {
   const app = $("#app");
   const parts = path.replace(/^\/(team|login)\/?/, "").split("/").filter(Boolean);
-  const [section = "", id] = parts;
+  const [section = "", rawId] = parts;
+  const id = rawId && /^(\d+|new)$/.test(rawId) ? rawId : undefined;  // ids go into API paths, so only numbers
   if (path === "/join") return joinScreen(app);
   let state;
   try { state = await api("/api/admin/state"); } catch (e) { clear(app).append(h("div.auth", h("div.auth-card", h("p", e.message)))); return; }

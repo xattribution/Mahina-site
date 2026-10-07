@@ -23,6 +23,8 @@ import os
 import re
 import secrets
 import time
+import ipaddress
+import threading
 import unicodedata
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
@@ -149,29 +151,65 @@ def password_login_enabled():
 
 # ---------- throttling ----------
 
-_fail_acct = defaultdict(deque)
-_fail_ip = defaultdict(deque)
+# Every attempt is counted before the password is checked, under a lock, so a burst of parallel guesses gets no more
+# tries than a slow one. Limits per 15 minutes:
+#   one device on one account: 8      one device on any accounts: 30      one account from everywhere: 40
+# The account-wide limit doesn't apply to a device that has signed in to that account before, so strangers failing
+# on purpose can't lock the real person out.
+WINDOW = 900
+_attempts = defaultdict(deque)
+_lock = threading.Lock()
 
 
-def _prune(dq, window):
-    now = time.time()
-    while dq and dq[0] < now - window:
+def _ipkey(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+        return str(ipaddress.ip_network(f"{a}/64", strict=False)) if a.version == 6 and not a.ipv4_mapped else str(a)
+    except ValueError:
+        return ip or "?"
+
+
+def _count(key, now):
+    dq = _attempts.get(key)
+    if not dq:
+        return 0
+    while dq and dq[0] < now - WINDOW:
         dq.popleft()
-    return dq
+    if not dq:
+        _attempts.pop(key, None)
+    return len(dq) if dq else 0
+
+
+def known_device(email, ip):
+    a = db.one("SELECT id FROM admins WHERE email=?", (email,))
+    since = (datetime.utcnow() - timedelta(days=90)).isoformat()
+    return bool(a and db.one("SELECT 1 FROM audit_log WHERE actor_id=? AND action='Signed in' AND ip=? AND at > ? LIMIT 1",
+                             (a["id"], ip, since)))
 
 
 def check_throttle(email: str, ip: str):
-    if len(_prune(_fail_acct[email], 900)) >= 8 or len(_prune(_fail_ip[ip], 900)) >= 30:
-        raise Invalid("Too many sign-in attempts. Wait 15 minutes and try again.", status=429)
+    """Count this attempt, or refuse it. Call before checking the password."""
+    now, ipk = time.time(), _ipkey(ip)
+    trusted = known_device(email, ip)
+    with _lock:
+        if len(_attempts) > 50_000:
+            for k in [k for k, d in _attempts.items() if not d or d[-1] < now - WINDOW]:
+                _attempts.pop(k, None)
+        over = (_count(("pair", email, ipk), now) >= 8 or _count(("ip", ipk), now) >= 30
+                or (not trusted and _count(("acct", email), now) >= 40))
+        if over:
+            raise Invalid("Too many sign-in attempts. Wait 15 minutes and try again.", status=429)
+        for k in (("pair", email, ipk), ("ip", ipk), ("acct", email)):
+            _attempts[k].append(now)
 
 
 def record_failure(email: str, ip: str):
-    _fail_acct[email].append(time.time())
-    _fail_ip[ip].append(time.time())
+    """Attempts are already counted in check_throttle. Kept so callers read clearly."""
 
 
-def clear_failures(email: str):
-    _fail_acct.pop(email, None)
+def clear_failures(email: str, ip: str = ""):
+    with _lock:
+        _attempts.pop(("pair", email, _ipkey(ip)), None)
 
 
 # ---------- sessions ----------

@@ -1,12 +1,19 @@
 """Mahina Club web app: public API, static site, calendar feed."""
+import html
 import io
+import ipaddress
 import json
+import sqlite3
+import threading
 import os
+import re
 import time
 from collections import defaultdict, deque
 
 import segno
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from . import db, mailer, media, store
@@ -18,10 +25,12 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
 app = FastAPI(title="Mahina Club", docs_url=None, redoc_url=None, openapi_url=None)
 db.init()
 
-UPLOAD_PATHS = ("/api/photos/submit", "/api/admin/photos", "/api/admin/settings/cover")
+# Big bodies are allowed only for these exact upload routes, and only as multipart POSTs. Everything else gets 1 MB.
+UPLOAD_LIMITS = {"/api/photos/submit": 100 * 1024 * 1024, "/api/admin/photos": 200 * 1024 * 1024,
+                 "/api/admin/settings/cover": 30 * 1024 * 1024}
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; "
-       "frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self' https:; frame-ancestors 'none'")
+       "frame-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
 
 
 class Guard:
@@ -34,8 +43,18 @@ class Guard:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         path = scope.get("path", "")
-        limit = 200 * 1024 * 1024 if path.startswith(UPLOAD_PATHS) else 1024 * 1024
         headers = dict(scope.get("headers") or [])
+        multipart = scope.get("method") == "POST" and headers.get(b"content-type", b"").startswith(b"multipart/form-data")
+        limit = UPLOAD_LIMITS.get(path, 1024 * 1024) if multipart else 1024 * 1024
+        if path == "/api/photos/submit" and not db.get_setting("public_uploads"):
+            # Turn people away before reading a single byte of their upload.
+            return await self._send_json(send, 403, b'{"error":"Photo sharing is turned off."}')
+        if multipart and path.startswith("/api/admin/"):
+            # Dashboard uploads need a signed-in session before the body is read.
+            cookies = headers.get(b"cookie", b"").decode("latin-1")
+            m = re.search(r"(?:^|;\s*)mc_session=([^;]+)", cookies)
+            if not (m and _auth.session_admin(m.group(1))):
+                return await self._send_json(send, 401, b'{"error":"Sign in to continue."}')
         https = scope.get("scheme") == "https" or headers.get(b"x-forwarded-proto") == b"https"
         try:
             if int(headers.get(b"content-length", b"0")) > limit:
@@ -69,9 +88,13 @@ class Guard:
         await self.app(scope, limited_receive, send_with_headers)
 
     @staticmethod
-    async def _too_big(send):
-        await send({"type": "http.response.start", "status": 413, "headers": [(b"content-type", b"application/json")]})
-        await send({"type": "http.response.body", "body": b'{"error":"That upload is too large."}'})
+    async def _send_json(send, status, body):
+        await send({"type": "http.response.start", "status": status, "headers": [(b"content-type", b"application/json"),
+                                                                                 (b"cache-control", b"no-store")]})
+        await send({"type": "http.response.body", "body": body})
+
+    async def _too_big(self, send):
+        await self._send_json(send, 413, b'{"error":"That upload is too large."}')
 
 
 from starlette.middleware.sessions import SessionMiddleware  # noqa: E402  (holds single sign-on state only)
@@ -85,9 +108,13 @@ app.add_middleware(Guard)
 @app.on_event("startup")
 def startup():
     db.init()
-    if os.environ.get("MAHINA_SEED") == "1" and not db.one("SELECT id FROM events LIMIT 1"):
+    # Demo content only goes into a brand-new site, once. Emptying a live site and restarting never brings it back
+    # (it would overwrite real settings, like the Venmo handle, with demo values).
+    if os.environ.get("MAHINA_SEED") == "1" and not db.get_setting("seeded") \
+            and not db.one("SELECT id FROM admins LIMIT 1") and not db.one("SELECT id FROM events LIMIT 1"):
         from . import seed
         seed.run()
+        db.set_setting("seeded", True)
     from . import admin
     admin.bootstrap_admin()
     if os.environ.get("MAHINA_NO_WORKER") != "1":
@@ -99,19 +126,57 @@ def invalid_handler(request, exc: Invalid):
     return JSONResponse({"error": exc.message, "field": exc.field}, status_code=exc.status)
 
 
+@app.exception_handler(RequestValidationError)
+def validation_handler(request, exc):
+    # FastAPI's default reply repeats the request body back, passwords included. Say less.
+    return JSONResponse({"error": "That request wasn't in the expected format.", "field": None}, status_code=400)
+
+
+@app.exception_handler(ValueError)
+@app.exception_handler(TypeError)
+@app.exception_handler(sqlite3.IntegrityError)
+def bad_input_handler(request, exc):
+    return JSONResponse({"error": "Check the form and try again.", "field": None}, status_code=400)
+
+
 # ---------- light abuse protection for public forms ----------
 
 _hits = defaultdict(deque)
+_hits_lock = threading.Lock()
+
+
+def ip_key(ip):
+    """IPv6 visitors get a whole /64 each, so one person can't dodge limits by rotating addresses inside it."""
+    try:
+        a = ipaddress.ip_address(ip)
+        return str(ipaddress.ip_network(f"{a}/64", strict=False)) if a.version == 6 and not a.ipv4_mapped else str(a)
+    except ValueError:
+        return ip or "?"
+
+
+def hit(key, limit, window, message="Too many tries. Wait a few minutes and try again."):
+    now = time.time()
+    with _hits_lock:
+        if len(_hits) > 50_000:  # memory guard: drop keys whose window has passed
+            for k in [k for k, d in _hits.items() if not d or d[-1] < now - 3600]:
+                del _hits[k]
+        dq = _hits[key]
+        while dq and dq[0] < now - window:
+            dq.popleft()
+        if len(dq) >= limit:
+            raise Invalid(message, status=429)
+        dq.append(now)
 
 
 def throttle(request: Request, bucket: str, limit=12, window=300):
     ip = request.client.host if request.client else "?"  # proxy-resolved by uvicorn for trusted proxies only
-    dq, now = _hits[(bucket, ip)], time.time()
-    while dq and dq[0] < now - window:
-        dq.popleft()
-    if len(dq) >= limit:
-        raise Invalid("Too many tries. Wait a few minutes and try again.", status=429)
-    dq.append(now)
+    hit((bucket, ip_key(ip)), limit, window)
+
+
+def throttle_email(bucket, email, limit, window=3600):
+    """Per-address limit, so no one can flood a person's inbox through the public forms."""
+    hit((bucket, "@", store.clean(email, 200).lower()), limit, window,
+        "That email address has had a lot of messages from us recently. Try again later.")
 
 
 def honeypot(body):
@@ -179,6 +244,7 @@ def event(slug: str):
 def event_rsvp(slug: str, request: Request, body: dict = Body(...)):
     honeypot(body)
     throttle(request, "rsvp", 20)
+    throttle_email("mail", body.get("email"), 8)
     return store.rsvp(get_event(slug), body)
 
 
@@ -208,7 +274,8 @@ def sheets():
 
 @app.get("/api/sheets/{sid}")
 def sheet(sid: int):
-    s = db.one("SELECT * FROM sheets WHERE id=? AND status!='hidden'", (sid,))
+    s = db.one("""SELECT sh.* FROM sheets sh LEFT JOIN events e ON e.id=sh.event_id
+                  WHERE sh.id=? AND sh.status!='hidden' AND (e.id IS NULL OR e.status IN ('published','cancelled'))""", (sid,))
     if not s:
         raise Invalid("We couldn't find that sign-up.", status=404)
     return store.sheet_out(s)
@@ -218,6 +285,7 @@ def sheet(sid: int):
 def slot_signup(slot_id: int, request: Request, body: dict = Body(...)):
     honeypot(body)
     throttle(request, "signup", 30)
+    throttle_email("mail", body.get("email"), 8)
     return store.signup(slot_id, body)
 
 
@@ -291,7 +359,7 @@ def poll_respond(slug: str, request: Request, body: dict = Body(...)):
     throttle(request, "poll", 20)
     p = get_poll(slug)
     res = store.respond(p, body)
-    if p["results"] in ("public", "after"):
+    if p["results"] == "public" or (p["results"] == "after" and store.poll_out(p, with_questions=False)["closed"]):
         res["tally"] = store.poll_results(p)
     return res
 
@@ -302,7 +370,7 @@ def poll_respond(slug: str, request: Request, body: dict = Body(...)):
 def photos():
     rows = db.q("SELECT * FROM photos WHERE status='approved' ORDER BY created DESC, id DESC")
     tags = store.tags_for("photo_tags", "photo_id", [r["id"] for r in rows])
-    evs = {e["id"]: e for e in db.q("SELECT id, slug, title, starts_at FROM events")}
+    evs = {e["id"]: e for e in db.q("SELECT id, slug, title, starts_at FROM events WHERE status IN ('published','cancelled')")}
     out = []
     for r in rows:
         p = store.photo_out(r)
@@ -321,16 +389,18 @@ async def submit_photos(request: Request, name: str = Form(""), email: str = For
         raise Invalid("Photo sharing is turned off.", status=403)
     throttle(request, "photos", 6, 600)
     store.need_name(name)
-    if len(files) > 20:
-        raise Invalid("Share up to 20 photos at a time.")
+    if len(files) > 10:
+        raise Invalid("Share up to 10 photos at a time.")
     ev = int(event_id) if event_id.isdigit() else None
+    if ev and not db.one("SELECT 1 FROM events WHERE id=? AND status IN ('published','cancelled')", (ev,)):
+        ev = None
     n = 0
     for f in files:
         data = await f.read()
         if len(data) > 25 * 1024 * 1024:
             raise Invalid(f"{f.filename} is over 25 MB.")
         try:
-            fn, th, w, h = media.save_image(data)
+            fn, th, w, h = await run_in_threadpool(media.save_image, data, media.PUBLIC_MAX_PIXELS)  # off the event loop
         except ValueError as e:
             raise Invalid(f"{f.filename}: {e}")
         pid = db.run("INSERT INTO photos(file, thumb, w, h, event_id, status, submitted_by, created) VALUES (?,?,?,?,?,?,?,?)",
@@ -348,6 +418,7 @@ async def submit_photos(request: Request, name: str = Form(""), email: str = For
 def contact(request: Request, body: dict = Body(...)):
     honeypot(body)
     throttle(request, "contact", 5, 600)
+    throttle_email("mail", body.get("email"), 8)
     name, email = store.need_name(body.get("name")), store.need_email(body.get("email"))
     text = store.clean(body.get("message"), 5000, multiline=True)
     if len(text) < 2:
@@ -389,12 +460,28 @@ def _btn(pal):
 
 
 @app.get("/unsubscribe/{tok}", response_class=HTMLResponse)
-def unsubscribe(tok: str):
+def unsubscribe_confirm(tok: str):
+    # Email security scanners open links on their own, so opening this page changes nothing. The button does.
+    r = db.one("SELECT * FROM subscribers WHERE token=?", (tok,))
+    if not r:
+        return plain_page("Not found", "<h1 style='letter-spacing:-.02em'>This link no longer works.</h1>"
+                          "<p>You may have already removed yourself. You won't get club emails.</p>")
+    pal = db.palette_colors()
+    safe = html.escape(tok, quote=True)
+    return plain_page("Unsubscribe", f"""<h1 style="letter-spacing:-.02em;color:{pal['ink']}">Stop club emails?</h1>
+<p>Sign-up confirmations and reminders for things you join still arrive.</p>
+<form method=post action="/unsubscribe/{safe}" style="margin-top:24px"><button style="{_btn(pal)}">Unsubscribe</button></form>""")
+
+
+@app.post("/unsubscribe/{tok}", response_class=HTMLResponse)
+def unsubscribe(tok: str, request: Request):
+    throttle(request, "forget", 20)
     r = db.one("SELECT * FROM subscribers WHERE token=?", (tok,))
     if not r:
         return plain_page("Not found", "<h1 style='letter-spacing:-.02em'>This link no longer works.</h1>"
                           "<p>You may have already removed yourself. You won't get club emails.</p>")
     db.run("UPDATE subscribers SET active=0 WHERE id=?", (r["id"],))
+    tok = html.escape(r["token"], quote=True)
     pal = db.palette_colors()
     return plain_page("Unsubscribed", f"""<h1 style="letter-spacing:-.02em;color:{pal['ink']}">You're off the list.</h1>
 <p>You won't get club emails anymore. Sign-up confirmations and reminders for things you join still arrive.</p>

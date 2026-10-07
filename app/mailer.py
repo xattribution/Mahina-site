@@ -201,6 +201,19 @@ def send_one(cfg, row):
             s.send_message(msg)
 
 
+def friendly_error(e):
+    """A plain reason for a failed send. Raw socket errors aren't shown, so the test button can't probe other servers."""
+    if isinstance(e, smtplib.SMTPAuthenticationError):
+        return "The email service turned down the username or password."
+    if isinstance(e, smtplib.SMTPRecipientsRefused):
+        return "The email service refused that address."
+    if isinstance(e, smtplib.SMTPSenderRefused):
+        return "The email service won't send from that From address. Use one it has verified."
+    if isinstance(e, (smtplib.SMTPConnectError, smtplib.SMTPServerDisconnected, OSError, ssl.SSLError)):
+        return "Couldn't connect to the email server. Check the server, port, and security setting."
+    return "Sending failed. Check the email settings."
+
+
 def flush(limit=40):
     cfg = smtp_config()
     if not cfg["ready"]:
@@ -213,7 +226,7 @@ def flush(limit=40):
             db.run("UPDATE outbox SET status='sent', sent_at=?, error='' WHERE id=?", (db.now_iso(), r["id"]))
             sent += 1
         except Exception as e:  # keep going; show the error in the admin outbox
-            db.run("UPDATE outbox SET status='failed', error=? WHERE id=?", (str(e)[:300], r["id"]))
+            db.run("UPDATE outbox SET status='failed', error=? WHERE id=?", (friendly_error(e), r["id"]))
     return sent
 
 

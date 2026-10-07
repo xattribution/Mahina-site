@@ -31,6 +31,8 @@ def safe_url(u, field, allow_path=False):
     u = clean(u, 400)
     if not u:
         return ""
+    if "\\" in u:
+        raise Invalid("Links can't contain a backslash.", field)
     if allow_path and u.startswith("/") and not u.startswith("//"):
         return u
     if allow_path and re.match(r"^[a-z0-9-]+(/[\w\-./?=&#%]*)?$", u, re.I) and "." not in u.split("/")[0]:
@@ -149,7 +151,7 @@ def event_detail(ev, admin=False):
     e["description"] = ev["description"]
     e["sheets"] = [sheet_out(s, admin) for s in db.q("SELECT * FROM sheets WHERE event_id=? ORDER BY sort, id", (ev["id"],))
                    if admin or s["status"] != "hidden"]
-    e["polls"] = [poll_out(p, with_questions=False) for p in db.q("SELECT * FROM polls WHERE event_id=?" + ("" if admin else " AND status!='draft'") + " ORDER BY created",
+    e["polls"] = [poll_out(p, with_questions=False, admin=admin) for p in db.q("SELECT * FROM polls WHERE event_id=?" + ("" if admin else " AND status!='draft'") + " ORDER BY created",
                                 (ev["id"],))]
     if e["capacity"]:
         e["spots_left"] = max(0, e["capacity"] - e["going"])
@@ -230,7 +232,9 @@ def sheet_out(s, admin=False):
          "filled": sum(x["taken"] for x in limited), "capacity": sum(x["capacity"] for x in limited),
          "people": sum(x["taken"] for x in out_slots), "servings": sum(x["servings"] for x in out_slots)}
     if s["event_id"]:
-        ev = db.one("SELECT slug, title, starts_at, location FROM events WHERE id=?", (s["event_id"],))
+        # Drafts stay private: the public sheet doesn't name an unpublished event.
+        ev = db.one("SELECT slug, title, starts_at, location FROM events WHERE id=?" + ("" if admin else " AND status IN ('published','cancelled')"),
+                    (s["event_id"],))
         if ev:
             ev["going"] = going_count(s["event_id"])
         o["event"] = ev
@@ -272,6 +276,8 @@ def signup(slot_id, body):
     if not slot:
         raise Invalid("That slot no longer exists.", status=404)
     sheet = db.one("SELECT * FROM sheets WHERE id=?", (slot["sheet_id"],))
+    if sheet["event_id"] and not db.one("SELECT 1 FROM events WHERE id=? AND status='published'", (sheet["event_id"],)):
+        raise Invalid("This sign-up isn't open.", status=404)
     if sheet["status"] != "open" or (sheet["closes_at"] and sheet["closes_at"] < db.now_iso()):
         raise Invalid("This sign-up is closed.")
     name, email = need_name(body.get("name")), need_email(body.get("email"))
@@ -363,11 +369,16 @@ def rsvp(ev, body):
         if current + 1 + guests > ev["capacity"]:
             left = ev["capacity"] - current
             raise Invalid("This event is full." if left <= 0 else f"Only {left} spots left.", "guests")
-    if existing and existing["status"] == "going":
-        # Don't let anyone change someone else's RSVP by typing their email. Re-send their link instead.
-        rows = [("When", mailer.fmt_when(ev)), ("Where", ev["location"])]
-        confirm_email(email, existing["name"], existing["token"], f"You're going to {ev['title']}", rows, ev)
-        return {"status": "going", "already": True, "going": going_count(ev["id"])}
+    if existing:
+        # Typing someone's email never changes their RSVP. Their change/cancel link goes to their inbox instead,
+        # at most once an hour.
+        since = (db.now_local() - timedelta(hours=1)).isoformat()
+        if not db.one("SELECT 1 FROM outbox WHERE lower(to_email)=? AND kind='confirmation' AND created > ? AND subject LIKE ?",
+                      (email, since, f"%{ev['title']}%")):
+            rows = [("Your answer", {"going": "Going", "maybe": "Maybe", "no": "Not going"}[existing["status"]]),
+                    ("When", mailer.fmt_when(ev)), ("Where", ev["location"])]
+            confirm_email(email, existing["name"], existing["token"], f"Your RSVP for {ev['title']}", rows, ev)
+        return {"status": existing["status"], "already": True, "going": going_count(ev["id"])}
     tok = existing["token"] if existing else my_token(email)
     reminders, news = email_prefs(body)
     if existing:
@@ -434,13 +445,14 @@ def forget(email):
         out["photos"] = run("UPDATE photos SET submitted_by='' WHERE instr(lower(submitted_by), ?) > 0")
         out["emails"] = run("DELETE FROM outbox WHERE lower(to_email)=?")
         out["orders"] = run("UPDATE orders SET name='', email='' WHERE lower(email)=?")  # sales totals stay, the person doesn't
+        run("DELETE FROM outbox WHERE kind='order-team' AND instr(lower(text), ?) > 0")  # team copies named them too
         run("DELETE FROM reminders_sent WHERE lower(email)=?")
     return out
 
 
 # ---------- polls ----------
 
-def poll_out(p, with_questions=True):
+def poll_out(p, with_questions=True, admin=False):
     o = {k: p[k] for k in ("id", "slug", "title", "intro", "status", "closes_at", "results")}
     o["collect_name"] = bool(p["collect_name"])
     o["one_per_email"] = bool(p["one_per_email"])
@@ -448,7 +460,8 @@ def poll_out(p, with_questions=True):
     o["closed"] = p["status"] == "closed" or bool(p["closes_at"] and p["closes_at"] < db.now_iso())
     o["responses"] = db.one("SELECT COUNT(*) n FROM responses WHERE poll_id=?", (p["id"],))["n"]
     if p["event_id"]:
-        o["event"] = db.one("SELECT slug, title, starts_at FROM events WHERE id=?", (p["event_id"],))
+        o["event"] = db.one("SELECT slug, title, starts_at FROM events WHERE id=?" + ("" if admin else " AND status IN ('published','cancelled')"),
+                            (p["event_id"],))
     if with_questions:
         o["questions"] = [{"id": x["id"], "kind": x["kind"], "prompt": x["prompt"], "options": json.loads(x["options"]),
                            "required": bool(x["required"])}

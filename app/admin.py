@@ -3,14 +3,16 @@ import csv
 import io
 import json
 import os
+import re
 import secrets
 import time
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Body, Depends, File, Form, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 
-from . import auth, db, mailer, media, store
+from . import auth, db, mailer, media, stepup, store
 from .store import Invalid, clean
 
 router = APIRouter(prefix="/api/admin")
@@ -132,8 +134,20 @@ def setup(request: Request, response: Response, body: dict = Body(...)):
         raise Invalid("Setup is already done. Sign in instead.", status=403)
     name, email = store.need_name(body.get("name")), store.need_email(body.get("email"))
     pw = auth.check_new_password(body.get("password") or "", email=email, name=name)
-    aid = db.run("INSERT INTO admins(email, name, pw_hash, role, created) VALUES (?,?,?,'admin',?)",
-                 (email, name, auth.hash_password(pw), db.now_iso()))
+    pw_hash = auth.hash_password(pw)
+    c = db.conn()
+    if c.in_transaction:
+        c.commit()
+    c.execute("BEGIN IMMEDIATE")  # only the first of two simultaneous setups wins
+    try:
+        if c.execute("SELECT 1 FROM admins LIMIT 1").fetchone():
+            raise Invalid("Setup is already done. Sign in instead.", status=403)
+        aid = c.execute("INSERT INTO admins(email, name, pw_hash, role, created) VALUES (?,?,?,'admin',?)",
+                        (email, name, pw_hash, db.now_iso())).lastrowid
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
     start_session(response, aid, request)
     audit({"id": aid, "name": name, "ip": client_ip(request)}, "Set up the site")
     return {"ok": True}
@@ -144,14 +158,17 @@ def login(request: Request, response: Response, body: dict = Body(...)):
     if not auth.password_login_enabled():
         raise Invalid("Password sign-in is off. Use single sign-on.", status=403)
     email, ip = clean(body.get("email"), 200).lower(), client_ip(request)
+    pw = body.get("password")
+    if not isinstance(pw, str):
+        raise Invalid("Enter your password.", "password")
     auth.check_throttle(email, ip)
     a = db.one("SELECT * FROM admins WHERE email=?", (email,))
-    ok, rehash = auth.verify_password(body.get("password") or "", a["pw_hash"] if a else None)
+    ok, rehash = auth.verify_password(pw, a["pw_hash"] if a else None)
     if not ok:
         auth.record_failure(email, ip)
         audit(None, "Failed sign-in", mask_email(email), ip=ip)
         raise Invalid("That email and password don't match.", status=401)
-    auth.clear_failures(email)
+    auth.clear_failures(email, ip)
     if rehash:
         db.run("UPDATE admins SET pw_hash=? WHERE id=?", (rehash, a["id"]))
     start_session(response, a["id"], request)
@@ -204,7 +221,7 @@ async def sso_callback(request: Request):
         return fail("failed")
     info = token.get("userinfo") or {}
     email = (info.get("email") or "").lower()
-    if not email or info.get("email_verified") is False:
+    if not email or info.get("email_verified") is not True:  # unverified or unstated emails never sign anyone in
         return fail("noemail")
     a = db.one("SELECT * FROM admins WHERE email=?", (email,))
     if not a:
@@ -264,13 +281,17 @@ def tags(a=Signed):
     return store.all_tags()
 
 
+def tag_color(c):
+    return c if c in ("reef", "plumeria", "fern", "lagoon", "lehua", "taro", "night") else "reef"
+
+
 @router.post("/tags")
 def tag_create(body: dict = Body(...), a=can("events", "photos")):
     name = clean(body.get("name"), 40)
     if not name:
         raise Invalid("Name the tag.", "name")
     tid = db.run("INSERT INTO tags(name, slug, color) VALUES (?,?,?)",
-                 (name, db.slugify(name, "tags"), body.get("color") or "reef"))
+                 (name, db.slugify(name, "tags"), tag_color(body.get("color"))))
     audit(a, "Added tag", name)
     return db.one("SELECT * FROM tags WHERE id=?", (tid,))
 
@@ -279,7 +300,7 @@ def tag_create(body: dict = Body(...), a=can("events", "photos")):
 def tag_update(tid: int, body: dict = Body(...), a=can("events", "photos")):
     name = clean(body.get("name"), 40)
     db.run("UPDATE tags SET name=?, slug=?, color=? WHERE id=?",
-           (name, db.slugify(name, "tags", tid), body.get("color") or "reef", tid))
+           (name, db.slugify(name, "tags", tid), tag_color(body.get("color")), tid))
     audit(a, "Changed tag", name)
     return {"ok": True}
 
@@ -411,6 +432,8 @@ def notify_attendees(eid, cancelled):
 @router.post("/events/{eid}/duplicate")
 def event_duplicate(eid: int, a=can("events")):
     ev = db.one("SELECT * FROM events WHERE id=?", (eid,))
+    if not ev:
+        raise Invalid("Event not found.", status=404)
     ev.pop("id")
     ev["title"] = ev["title"] + " (copy)"
     ev["slug"] = db.slugify(ev["title"], "events")
@@ -454,7 +477,7 @@ def csv_cell(v):
 def csv_response(filename, header, rows):
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(header)
+    w.writerow([csv_cell(c) for c in header])
     w.writerows([[csv_cell(c) for c in r] for r in rows])
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
@@ -643,7 +666,7 @@ def sheet_export(sid: int, a=can("signups", "events")):
 
 @router.get("/polls")
 def polls(a=can("polls")):
-    return [store.poll_out(p, with_questions=False) for p in db.q("SELECT * FROM polls ORDER BY created DESC")]
+    return [store.poll_out(p, with_questions=False, admin=True) for p in db.q("SELECT * FROM polls ORDER BY created DESC")]
 
 
 @router.get("/polls/{pid}")
@@ -651,7 +674,7 @@ def poll(pid: int, a=can("polls")):
     p = db.one("SELECT * FROM polls WHERE id=?", (pid,))
     if not p:
         raise Invalid("Poll not found.", status=404)
-    out = store.poll_out(p)
+    out = store.poll_out(p, admin=True)
     out["tally"] = store.poll_results(p)
     return out
 
@@ -791,7 +814,7 @@ async def photos_upload(event_id: str = Form(""), tag_ids: str = Form(""), files
             data = await f.read()
             if len(data) > 40 * 1024 * 1024:
                 raise ValueError("over 40 MB")
-            fn, th, w, h = media.save_image(data)
+            fn, th, w, h = await run_in_threadpool(media.save_image, data)
         except ValueError as e:
             errors.append(f"{f.filename}: {e}")
             continue
@@ -1001,19 +1024,37 @@ def email_test(a=AdminOnly):
         mailer.send_one(cfg, row)
         db.run("UPDATE outbox SET status='sent', sent_at=? WHERE id=?", (db.now_iso(), row["id"]))
     except Exception as e:
-        db.run("UPDATE outbox SET status='failed', error=? WHERE id=(SELECT MAX(id) FROM outbox)", (str(e)[:300],))
-        raise Invalid(f"Sending failed: {e}")
+        msg = mailer.friendly_error(e)
+        db.run("UPDATE outbox SET status='failed', error=? WHERE id=(SELECT MAX(id) FROM outbox)", (msg,))
+        raise Invalid(msg)
     return {"ok": True, "to": a["email"]}
+
+
+# Emails can carry private links (team invites, people's change/cancel and unsubscribe links). The outbox shows them
+# with those links blanked out, and team invites and security notices aren't listed for members at all.
+_PRIVATE_LINK = re.compile(r"(/join#|/me/|/unsubscribe/)[A-Za-z0-9_\-]+")
+ADMIN_ONLY_KINDS = ("invite-team", "security")
+
+
+def redact(text):
+    return _PRIVATE_LINK.sub(lambda m: m.group(1) + "…", text or "")
 
 
 @router.get("/outbox")
 def outbox(a=can("email")):
-    return db.q("SELECT id, to_email, subject, kind, status, error, created, sent_at FROM outbox ORDER BY id DESC LIMIT 300")
+    hide = "" if a["role"] == "admin" else f"WHERE kind NOT IN ({','.join('?' * len(ADMIN_ONLY_KINDS))}) "
+    return db.q(f"SELECT id, to_email, subject, kind, status, error, created, sent_at FROM outbox {hide}ORDER BY id DESC LIMIT 300",
+                () if a["role"] == "admin" else ADMIN_ONLY_KINDS)
 
 
 @router.get("/outbox/{oid}")
 def outbox_item(oid: int, a=can("email")):
-    return db.one("SELECT id, to_email, subject, html, status, error FROM outbox WHERE id=?", (oid,))
+    r = db.one("SELECT id, to_email, subject, html, kind, status, error FROM outbox WHERE id=?", (oid,))
+    if not r or (r["kind"] in ADMIN_ONLY_KINDS and a["role"] != "admin"):
+        raise Invalid("Email not found.", status=404)
+    r["html"] = redact(r["html"])
+    r.pop("kind")
+    return r
 
 
 @router.post("/outbox/retry")
@@ -1028,7 +1069,7 @@ def outbox_retry(a=can("email")):
 
 @router.post("/outbox/clear")
 def outbox_clear(a=can("email")):
-    db.run("DELETE FROM outbox WHERE status IN ('held','failed')")
+    db.run("DELETE FROM outbox WHERE status IN ('held','failed') AND kind != 'security'")  # change alerts can't be discarded
     audit(a, "Discarded waiting emails")
     return {"ok": True}
 
@@ -1127,6 +1168,18 @@ def settings(a=AdminOnly):
 @router.put("/settings")
 def settings_update(body: dict = Body(...), a=AdminOnly):
     body = sanitize_settings(body)
+    old_venmo = db.get_setting("venmo") or ""
+    venmo_changed = "venmo" in body and body["venmo"] != old_venmo
+    old_smtp, old_cfg = db.get_setting("smtp") or {}, mailer.smtp_config()
+    smtp_changed = "smtp" in body and (any(
+        str(body["smtp"].get(k) if k in body["smtp"] else old_smtp.get(k) or "") != str(old_smtp.get(k) or "")
+        for k in ("host", "port", "user", "from", "security"))
+        or ("password" in body["smtp"] and body["smtp"]["password"] != "••••••••"
+            and (body["smtp"]["password"] or "") != (old_smtp.get("password") or "")))
+    if venmo_changed or smtp_changed:
+        # Where money goes, and the email server that carries confirmation codes, need a fresh confirmation first.
+        # Before email is set up, that's the admin's password.
+        stepup.require(a)
     for k in PUBLIC_KEYS:
         if k in body:
             db.set_setting(k, body[k])
@@ -1134,21 +1187,53 @@ def settings_update(body: dict = Body(...), a=AdminOnly):
         cur = db.get_setting("smtp") or {}
         new = {k: body["smtp"].get(k, cur.get(k)) for k in ("host", "port", "user", "password", "from", "security")}
         if new["password"] == "••••••••":
+            # The saved password only goes back to the server it was entered for.
+            moved = any(str(new.get(k) or "") != str(cur.get(k) or "") for k in ("host", "port", "user", "security"))
+            if moved and cur.get("password"):
+                raise Invalid("Enter the password again for the new server details.", "password")
             new["password"] = cur.get("password", "")
+        if new["security"] == "none" and new["user"]:
+            raise Invalid("Use STARTTLS or SSL when signing in to the email server, so the password isn't sent in the clear.", "security")
         db.set_setting("smtp", new)
     names = {"smtp": "email server", "home_sections": "home sections", "spotlight": "featured item", "donate_goal": "fundraising goal",
              "donate_uses": "giving uses", "public_uploads": "photo sharing", "moon_caption": "moon name", "site_url": "site address"}
     changed = [names.get(k, k.replace("_", " ")) for k in body if k in PUBLIC_KEYS or k == "smtp"]
     if changed:
         audit(a, "Changed settings", ", ".join(changed))
+    if smtp_changed:
+        new = db.get_setting("smtp") or {}
+        audit(a, "Changed the email server", f"{old_smtp.get('host')} → {new.get('host')}")
+        stepup.alert_admins(a, "the email server", f"{old_smtp.get('host')} → {new.get('host') or '(none)'}", cfg=old_cfg)
+    if venmo_changed:
+        audit(a, "Changed the club Venmo handle", f"@{old_venmo or '(none)'} → @{body['venmo'] or '(none)'}")
+        stepup.alert_admins(a, "the club Venmo handle", f"@{old_venmo or '(none)'} → @{body['venmo'] or '(none)'}")
     return settings(a)
+
+
+@router.post("/stepup/start")
+def stepup_start(a=AdminOnly):
+    return stepup.start(a)
+
+
+@router.post("/stepup/check")
+def stepup_check(request: Request, response: Response, body: dict = Body(...), a=AdminOnly):
+    r = stepup.check(a, body)
+    # A fresh session cookie carries the pass. The old one stops working, so a copied cookie can't ride along.
+    tok = auth.create_session(a["id"])
+    db.run("UPDATE sessions SET stepup_until=(SELECT stepup_until FROM sessions WHERE token=?) WHERE token=?",
+           (a["token"], auth._digest(tok)))
+    db.run("DELETE FROM sessions WHERE token=?", (a["token"],))
+    response.set_cookie(COOKIE, tok, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="strict",
+                        secure=is_https(request), path="/")
+    audit(a, "Confirmed it's them for a protected change")
+    return r
 
 
 @router.post("/settings/cover")
 async def upload_single(file: UploadFile = File(...), a=can("events", "photos", "signups", "shop")):
     """Upload one image (event cover, sign-up slot, product) without putting it in the gallery."""
     try:
-        fn, th, w, h = media.save_image(await file.read())
+        fn, th, w, h = await run_in_threadpool(media.save_image, await file.read())
     except ValueError as e:
         raise Invalid(str(e))
     pid = db.run("INSERT INTO photos(file, thumb, w, h, status, submitted_by, created) VALUES (?,?,?,?,?,?,?)",
@@ -1191,6 +1276,7 @@ def admin_create(body: dict = Body(...), a=AdminOnly):
     if db.one("SELECT id FROM admins WHERE email=?", (email,)):
         raise Invalid("That person already has an account.", "email")
     role = "member" if body.get("role") == "member" else "admin"
+    stepup.require(a)  # new accounts outlive a stolen session, so making one takes the same check as payment settings
     perms = clean_perms(body.get("perms") if "perms" in body else DEFAULT_MEMBER_PERMS) if role == "member" else []
     pw_hash = ""
     if auth.password_login_enabled():
@@ -1199,6 +1285,8 @@ def admin_create(body: dict = Body(...), a=AdminOnly):
     db.run("INSERT INTO admins(email, name, pw_hash, role, perms, created) VALUES (?,?,?,?,?,?)",
            (email, name, pw_hash, role, json.dumps(perms), db.now_iso()))
     audit(a, f"Added {'an admin' if role == 'admin' else 'a member'}", name)
+    if role == "admin":
+        stepup.alert_admins(a, "the admin list", f"Added {name} ({mask_email(email)}) as an admin")
     return {"ok": True}
 
 
@@ -1216,6 +1304,8 @@ def admin_update(aid: int, request: Request, body: dict = Body(...), a=AdminOnly
         if admin_count() <= 1:
             raise Invalid("Keep at least one admin.")
     perms = clean_perms(body.get("perms", json.loads(row["perms"] or "[]"))) if role == "member" else []
+    if role != row["role"] or body.get("password"):
+        stepup.require(a)  # role changes and setting someone's password take the same check as payment settings
     new_hash = None
     if body.get("password"):
         if aid == a["id"]:
@@ -1224,6 +1314,7 @@ def admin_update(aid: int, request: Request, body: dict = Body(...), a=AdminOnly
     db.run("UPDATE admins SET name=?, role=?, perms=? WHERE id=?", (name, role, json.dumps(perms), aid))
     if role != row["role"]:
         audit(a, "Made an admin" if role == "admin" else "Changed to member", name)
+        stepup.alert_admins(a, "the admin list", f"{name} is now {'an admin' if role == 'admin' else 'a member'}")
     elif role == "member":
         audit(a, "Changed access", f"{name}: {', '.join(PERMS[p] for p in perms) or 'nothing'}")
     if new_hash:
@@ -1242,9 +1333,13 @@ def admin_delete(aid: int, a=AdminOnly):
         raise Invalid("You can't remove yourself.")
     if row["role"] == "admin" and admin_count() <= 1:
         raise Invalid("Keep at least one admin.")
+    if row["role"] == "admin":
+        stepup.require(a)
     db.run("DELETE FROM sessions WHERE admin_id=?", (aid,))
     db.run("DELETE FROM admins WHERE id=?", (aid,))
     audit(a, "Removed an account", row["name"])
+    if row["role"] == "admin":
+        stepup.alert_admins(a, "the admin list", f"Removed {row['name']} ({mask_email(row['email'])})")
     return {"ok": True}
 
 
@@ -1255,6 +1350,8 @@ def change_password(request: Request, body: dict = Body(...), a=Signed):
         ok, _ = auth.verify_password(body.get("current") or "", row["pw_hash"])
         if not ok:
             raise Invalid("Your current password is wrong.", "current")
+    elif row["role"] == "admin":
+        stepup.require(a)  # a first password for a single-sign-on admin: prove it's them some other way first
     pw = auth.check_new_password(body.get("new") or "", email=row["email"], name=row["name"], field="new")
     db.run("UPDATE admins SET pw_hash=? WHERE id=?", (auth.hash_password(pw), a["id"]))
     auth.end_other_sessions(a["id"], request.cookies.get(COOKIE))
@@ -1305,6 +1402,7 @@ def invite_create(body: dict = Body(...), a=AdminOnly):
     if db.one("SELECT id FROM admins WHERE email=?", (email,)):
         raise Invalid("That person already has an account.", "email")
     role = "admin" if body.get("role") == "admin" else "member"
+    stepup.require(a)
     perms = clean_perms(body.get("perms") if "perms" in body else DEFAULT_MEMBER_PERMS) if role == "member" else []
     db.run("DELETE FROM invites WHERE email=? AND used_at IS NULL", (email,))  # one open invite per person
     iid = db.run("INSERT INTO invites(token, email, name, role, perms, invited_by, invited_by_name, created, expires) "
@@ -1312,6 +1410,8 @@ def invite_create(body: dict = Body(...), a=AdminOnly):
                                                 db.now_iso(), db.now_iso()))
     link, expires = send_invite(a, iid, email, name, role)
     audit(a, f"Invited {'an admin' if role == 'admin' else 'a member'}", name or mask_email(email))
+    if role == "admin":
+        stepup.alert_admins(a, "the admin list", f"Invited {mask_email(email)} to be an admin")
     ready = mailer.smtp_config()["ready"]
     # Without email set up, the admin gets the link once to pass along; it isn't stored anywhere readable.
     return {"ok": True, "emailed": ready, "link": None if ready else link, "expires": expires}
@@ -1322,6 +1422,7 @@ def invite_resend(iid: int, a=AdminOnly):
     r = db.one("SELECT * FROM invites WHERE id=? AND used_at IS NULL", (iid,))
     if not r:
         raise Invalid("That invite was already used or removed.", status=404)
+    stepup.require(a)
     link, expires = send_invite(a, iid, r["email"], r["name"], r["role"])
     audit(a, "Resent an invite", r["name"] or mask_email(r["email"]))
     ready = mailer.smtp_config()["ready"]

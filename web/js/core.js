@@ -23,11 +23,11 @@ export function h(tag, attrs, ...kids) {
           if (p.startsWith("--")) el.style.setProperty(p, val); else el.style[p] = val;
         }
       }
-      else if (k === "html") el.innerHTML = v;
       else if (k in el && typeof v !== "string" && k !== "list") el[k] = v;
       else el.setAttribute(k, v === true ? "" : v);
     }
   } else if (attrs != null) kids.unshift(attrs);
+  if (name === "a" && el.getAttribute("target") === "_blank" && !el.hasAttribute("rel")) el.setAttribute("rel", "noopener");
   append(el, kids);
   return el;
 }
@@ -131,8 +131,39 @@ export async function api(path, opts = {}) {
   let res;
   try { res = await fetch(path, init); } catch { throw new ApiError("Can't reach the server. Check your connection.", 0); }
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text();
+  if (res.status === 428 && data?.field === "stepup" && !opts._confirmed) {
+    // Payment settings need a fresh confirmation. Ask, then send the same request again.
+    if (await confirmIdentity()) return api(path, { ...opts, _confirmed: true });
+    throw new ApiError("Nothing was changed.", 428);
+  }
   if (!res.ok) throw new ApiError(data?.error || data?.detail || "Something went wrong on our side. Try again.", res.status, data?.field);
   return data;
+}
+// "Confirm it's you": a code emailed to the signed-in admin (or their password before email is set up).
+async function confirmIdentity() {
+  let start;
+  try { start = await api("/api/admin/stepup/start", { method: "POST" }); } catch (e) { toast(e.message, "error"); return false; }
+  const byEmail = start.method === "email";
+  return new Promise((resolve) => {
+    let ok = false;
+    const inp = byEmail ? input("code", { inputmode: "numeric", autocomplete: "one-time-code", maxlength: 7, required: true })
+      : input("password", { type: "password", autocomplete: "current-password", required: true });
+    const form = h("form.confirm-id",
+      h("p", byEmail ? `Enter the 6-digit code we just emailed to ${start.to}.`
+        : start.reason === "email" ? "The code email couldn't be sent. Enter your password instead." : "Enter your password to continue."),
+      field(byEmail ? "Code" : "Password", inp), h("p.form-error"),
+      h("div.row", { style: { justifyContent: "space-between", marginTop: "8px" } },
+        byEmail ? h("button.btn.small.ghost", { type: "button", onclick: async () => {
+          try { await api("/api/admin/stepup/start", { method: "POST" }); toast("New code sent"); } catch (e) { toast(e.message, "error"); }
+        } }, "Send a new code") : h("span"),
+        h("button.btn", { type: "submit" }, "Confirm")));
+    onSubmit(form, async (v) => {
+      await api("/api/admin/stepup/check", { method: "POST", body: byEmail ? { code: v.code } : { password: v.password } });
+      ok = true; m.close();
+    });
+    const m = modal(h("div", h("h2", "Confirm it's you"), form), { label: "Confirm it's you", onClose: () => resolve(ok) });
+    setTimeout(() => inp.focus(), 50);
+  });
 }
 export const media = (src) => (src && CFG.demo && src.startsWith("/") ? (CFG.mediaBase || ".") + src : src);
 
@@ -185,7 +216,8 @@ export async function render() {
   for (const r of routes) {
     const m = path.match(r.re);
     if (m) {
-      const params = Object.fromEntries(r.keys.map((k, i) => [k, decodeURIComponent(m[i + 1])]));
+      // Params stay URL-encoded, so one can't smuggle a "/" or ".." into the API path it's used in.
+      const params = Object.fromEntries(r.keys.map((k, i) => { let v = m[i + 1]; try { v = decodeURIComponent(v); } catch {} return [k, encodeURIComponent(v)]; }));
       return renderHook(r.fn, params, path);
     }
   }

@@ -194,11 +194,18 @@ async function ordersTab(data, reload, setTab, focus) {
     if (o.status === "paid" && !o.picked_up) b.push(h("button.btn.small.dark", { type: "button", onclick: () => act(o, "picked_up") }, "Handed out"));
     if (o.status === "paid" && o.picked_up && o.channel === "online") b.push(h("button.btn.small.ghost", { type: "button", onclick: () => act(o, "not_picked_up") }, "Undo"));
     b.push(h("button.icon-btn", { type: "button", "aria-label": `Send ${o.code} to someone`, title: "Send to someone", onclick: () => sendDialog(o, data.people || [], draw) }, icon("send", 16)));
-    if (o.status !== "cancelled") b.push(h("button.icon-btn", { type: "button", "aria-label": `Cancel ${o.code}`, title: "Cancel order", onclick: async () => {
-      const msg = o.status === "paid" ? `Cancel ${o.code}? Refund the ${money(o.total)} in Venmo or cash yourself.` : `Cancel ${o.code}?`;
-      if (await confirmBox(msg + (o.picked_up ? "" : " The items go back in stock."), { ok: "Cancel order" })) act(o, "cancel");
-    } }, icon("close", 16)));
+    if (o.status === "pending" || (o.status === "paid" && isAdmin())) b.push(h("button.icon-btn", { type: "button", "aria-label": `Cancel ${o.code}`, title: "Cancel order", onclick: () => cancelDialog(o) }, icon("close", 16)));
     return h("div.row", { style: { gap: "6px", flexWrap: "nowrap", justifyContent: "flex-end" } }, b);
+  };
+  const cancelDialog = (o) => {
+    const paid = o.status === "paid";
+    const form = h("form",
+      h("p", paid ? `Refund the ${money(o.total)} in Venmo or cash yourself.` : `${o.code} for ${money(o.total)}.`, o.picked_up ? "" : " The items go back in stock."),
+      field("Reason", input("reason", { maxlength: 200, required: paid, placeholder: paid ? "Refunded, wrong size" : "" }), { optional: !paid }),
+      h("p.form-error"),
+      h("div.row.end", h("button.btn.ghost", { type: "button", onclick: () => m.close() }, "Keep it"), h("button.btn.danger", { type: "submit" }, "Cancel order")));
+    onSubmit(form, async (v) => { await api(`/api/admin/shop/orders/${o.id}/status`, { method: "POST", body: { action: "cancel", reason: v.reason } }); m.close(); draw(); });
+    const m = modal(h("div", h("h2", `Cancel ${o.code}?`), form), { label: "Cancel order" });
   };
   const draw = async () => {
     clear(tableBox).append(loading());
@@ -250,6 +257,7 @@ function productsTab(data, reload, setTab) {
 
 function productForm(p, onDone) {
   const st = { photo: p?.photo || null, options: [...(p?.options || [])], tracked: p ? p.tracked : false, stock: { ...(p?.left || {}) } };
+  const loaded = { ...(p?.left || {}) };  // what the form showed, so sales made meanwhile aren't overwritten
   const photoBox = h("div.prod-photo");
   const drawPhoto = () => clear(photoBox).append(
     h("button.prod-photo-btn", { type: "button", "aria-label": st.photo ? "Change picture" : "Add a picture", onclick: () => pickSlotImage(st.photo, (ph) => { st.photo = ph; drawPhoto(); }) },
@@ -295,7 +303,8 @@ function productForm(p, onDone) {
   onSubmit(form, async (v) => {
     const keys = st.options.length ? st.options : [""];
     const stock = st.tracked ? Object.fromEntries(keys.map((k) => [k, st.stock[k] === undefined || st.stock[k] === null ? "" : String(st.stock[k])])) : {};
-    const body = { name: v.name, price: v.price, description: v.description, options: st.options, stock, active: v.active, photo_id: st.photo?.id || null };
+    const body = { name: v.name, price: v.price, description: v.description, options: st.options, stock, active: v.active, photo_id: st.photo?.id || null,
+      stock_was: p ? Object.fromEntries(Object.entries(loaded).filter(([, n]) => typeof n === "number")) : undefined };
     await api(p ? `/api/admin/shop/products/${p.id}` : "/api/admin/shop/products", { method: p ? "PUT" : "POST", body });
     m.close(); toast(p ? "Saved" : "Product added"); onDone();
   });
@@ -336,6 +345,10 @@ function settingsTab(data, reload) {
     h("div.two", field("Email address", input("user", { value: s.imap.user, type: "email", autocomplete: "off" })),
       field("App password", input("password", { value: s.imap.password, type: "password", autocomplete: "new-password" }),
         { hintText: "Gmail: turn on 2-Step Verification, then make an app password at myaccount.google.com/apppasswords. Use the mailbox Venmo emails when someone pays the club." })),
+    field("Club's Venmo email", input("venmo_email", { value: s.imap.venmo_email || "", type: "email", autocomplete: "off", placeholder: s.imap.user || "" }),
+      { optional: true, hintText: "The email address on the club's Venmo account. Only payments Venmo sent to this address count. Leave it blank when it's the same as the mailbox above." }),
+    field("Trusted mail server", input("authserv", { value: s.imap.authserv || "", placeholder: /gmail/i.test(s.imap.host || "") ? "mx.google.com" : "", autocomplete: "off" }),
+      { optional: true, hintText: "The name your mail provider stamps on its checks of incoming mail (the first word of the Authentication-Results header). Gmail is set automatically. Filling this in for other providers stops a forged header from counting." }),
     statusLine,
     h("p.form-error"),
     h("div.row",
@@ -345,7 +358,7 @@ function settingsTab(data, reload) {
         try { drawStatus(await api("/api/admin/shop/check-mail", { method: "POST" })); } catch (err) { toast(err.message, "error"); }
         e.currentTarget.disabled = false;
       } }, "Check now")));
-  onSubmit(imap, async (v) => { const r = await save({ imap: { host: v.host, folder: v.folder, user: v.user, password: v.password } }); drawStatus(r.imap_status); });
+  onSubmit(imap, async (v) => { const r = await save({ imap: { host: v.host, folder: v.folder, user: v.user, password: v.password, authserv: v.authserv, venmo_email: v.venmo_email } }); drawStatus(r.imap_status); });
 
   const mm = s.mail || {};
   const mailForm = h("form",

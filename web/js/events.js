@@ -495,7 +495,7 @@ function rsvpPanel(ev) {
     }
     if (done) {
       box.append(h("div.rsvp-done",
-        h("div.big", icon("check"), done.already ? "You're already going" : "You're going"),
+        h("div.big", icon("check"), done.already ? "You've already answered" : "You're going"),
         h("p.muted", { style: { margin: 0 } }, done.already
           ? "We sent the link to change or cancel to your email again."
           : "Check your email for your confirmation and a link to change or cancel."),

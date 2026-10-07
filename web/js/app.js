@@ -52,7 +52,7 @@ function banner() {
   const b = S.banner || {};
   if (!EDIT.on) {
     if (!b.active || !b.text) return null;
-    return h("div.banner", /^\/(?!\/)/.test(b.link || "") ? link(b.link, {}, b.text, icon("right", 16))
+    return h("div.banner", /^\/(?![\/\\])[^\\]*$/.test(b.link || "") ? link(b.link, {}, b.text, icon("right", 16))
       : /^https:\/\//.test(b.link || "") ? h("a", { href: b.link, rel: "noopener" }, b.text, icon("right", 16)) : b.text);
   }
   const save = (patch, redraw = false) => saveSettings({ banner: { text: b.text || "", link: b.link || "", active: !!b.active, ...patch } }, { redraw });

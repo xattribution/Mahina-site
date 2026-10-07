@@ -135,6 +135,13 @@ CREATE TABLE IF NOT EXISTS orders (
   created TEXT NOT NULL, paid_at TEXT, paid_by TEXT DEFAULT '', picked_up_at TEXT);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 
+-- One pending confirm-it's-you check per browser session (hashed code, or "password" when email isn't set up).
+CREATE TABLE IF NOT EXISTS step_checks (session TEXT PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE,
+  method TEXT NOT NULL, code_hash TEXT NOT NULL DEFAULT '', expires TEXT NOT NULL, tries INTEGER NOT NULL DEFAULT 0);
+
+-- Venmo emails already used to pay an order, so one email can never pay twice.
+CREATE TABLE IF NOT EXISTS venmo_seen (msg_key TEXT PRIMARY KEY, code TEXT NOT NULL, at TEXT NOT NULL);
+
 -- Who did what in the admin console.
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor_id INTEGER, actor TEXT NOT NULL,
@@ -244,6 +251,9 @@ ADDED_COLUMNS = [
     ("outbox", "from_addr", "TEXT DEFAULT ''"),
     ("outbox", "reply_to", "TEXT DEFAULT ''"),
     ("orders", "sent_to", "TEXT DEFAULT '[]'"),
+    ("sessions", "stepup_until", "TEXT"),
+    ("orders", "ip_key", "TEXT DEFAULT ''"),     # a one-way hash of the buyer's network, only to cap unpaid holds
+    ("orders", "expired", "INTEGER DEFAULT 0"),  # released for non-payment (not cancelled by a person)
 ]
 
 
@@ -308,9 +318,9 @@ def prune():
     c.execute("DELETE FROM outbox WHERE status='sent' AND created < ?", ((now - timedelta(days=90)).isoformat(),))
     c.execute("DELETE FROM audit_log WHERE at < ?", ((now - timedelta(days=400)).isoformat(),))
     c.execute("DELETE FROM invites WHERE expires < ?", ((now - timedelta(days=30)).isoformat(),))
-    # Online orders nobody paid for in two weeks are cancelled, and their items go back on the shelf.
+    # Unpaid shop orders are released after their hold time, and their items go back on the shelf.
     from . import shop
-    shop.expire_stale(c, (now - timedelta(days=14)).isoformat())
+    shop.expire_stale()
     c.commit()
 
 
