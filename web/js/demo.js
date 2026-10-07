@@ -50,6 +50,7 @@
         return wait({ email: mine.email || "you@example.com", name: mine.name || "", subscribed: true, rsvps: mine.rsvps, signups: mine.signups });
       }
       if (path === "/api/admin/email/preview") return wait({ count: 14 });
+      if (path === "/api/admin/invites") return wait(D[path] || []);
       if (D[path] !== undefined) return wait(D[path]);
       throw new DemoError("That isn't part of this preview.", 404);
     }
@@ -190,6 +191,17 @@
     if ((m = path.match(/^\/api\/admin\/planning\/(\d+)\/notes$/))) {
       const a = D["/api/admin/state"].admin;
       return wait({ id: Date.now(), author_id: a.id, author: a.name, body: body.body, created: new Date().toISOString().slice(0, 19) });
+    }
+    if (path === "/api/admin/invites") {
+      if (!emailOk(body.email)) throw new DemoError("Enter an email address like name@example.com.", 400, "email");
+      (D["/api/admin/invites"] ||= []).unshift({ id: Date.now(), email: body.email, name: body.name || "", role: body.role, perms: body.perms || [],
+        invited_by: D["/api/admin/state"].admin.name, created: new Date().toISOString().slice(0, 19), expires: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 19), expired: false });
+      return wait({ ok: true, emailed: true, link: null });
+    }
+    if (/^\/api\/admin\/invites\/\d+\/resend$/.test(path)) return wait({ ok: true, emailed: true });
+    if ((m = path.match(/^\/api\/admin\/invites\/(\d+)$/)) && method === "DELETE") {
+      D["/api/admin/invites"] = (D["/api/admin/invites"] || []).filter((i) => i.id !== Number(m[1]));
+      return wait({ ok: true });
     }
     if (method === "PUT" || method === "DELETE" || path.endsWith("/bulk")) return wait({ ok: true, id: 0 });
     readOnly();

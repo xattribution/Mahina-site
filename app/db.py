@@ -115,6 +115,13 @@ CREATE TABLE IF NOT EXISTS plan_notes (
   author_id INTEGER REFERENCES admins(id) ON DELETE SET NULL, author TEXT NOT NULL,
   body TEXT NOT NULL, created TEXT NOT NULL);
 
+-- Invites to join the team. Only a hash of each link's token is stored. Links work once and expire.
+CREATE TABLE IF NOT EXISTS invites (
+  id INTEGER PRIMARY KEY, token TEXT UNIQUE NOT NULL, email TEXT NOT NULL, name TEXT DEFAULT '',
+  role TEXT NOT NULL DEFAULT 'member', perms TEXT NOT NULL DEFAULT '[]',
+  invited_by INTEGER REFERENCES admins(id) ON DELETE SET NULL, invited_by_name TEXT DEFAULT '',
+  created TEXT NOT NULL, expires TEXT NOT NULL, used_at TEXT);
+
 -- Who did what in the admin console.
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor_id INTEGER, actor TEXT NOT NULL,
@@ -262,6 +269,7 @@ def prune():
     from datetime import timedelta
     c.execute("DELETE FROM outbox WHERE status='sent' AND created < ?", ((now - timedelta(days=90)).isoformat(),))
     c.execute("DELETE FROM audit_log WHERE at < ?", ((now - timedelta(days=400)).isoformat(),))
+    c.execute("DELETE FROM invites WHERE expires < ?", ((now - timedelta(days=30)).isoformat(),))
     c.commit()
 
 

@@ -1229,6 +1229,123 @@ def change_password(request: Request, body: dict = Body(...), a=Signed):
     return {"ok": True}
 
 
+# ---------- invites ----------
+# An admin invites someone by email. The link carries a random token in the URL fragment (after #), so it never
+# reaches server logs. The database keeps only its SHA-256 hash. A link works once, for INVITE_DAYS days,
+# and only for the email it was sent to. No one can create an account without one.
+INVITE_DAYS = 7
+
+
+def invite_out(r):
+    return {"id": r["id"], "email": r["email"], "name": r["name"], "role": r["role"],
+            "perms": clean_perms(json.loads(r["perms"] or "[]")) if r["role"] == "member" else sorted(PERMS),
+            "invited_by": r["invited_by_name"], "created": r["created"], "expires": r["expires"],
+            "expired": r["expires"] < db.now_iso()}
+
+
+def send_invite(a, inv_id, email, name, role):
+    """Make a fresh link for an invite (any older link for it stops working) and email it."""
+    tok = secrets.token_urlsafe(32)
+    expires = (db.now_local() + timedelta(days=INVITE_DAYS)).isoformat()
+    db.run("UPDATE invites SET token=?, expires=?, created=? WHERE id=?", (auth._digest(tok), expires, db.now_iso(), inv_id))
+    link = f"{mailer.site_url()}/join#{tok}"
+    club = db.get_setting("club_name") or "Mahina Club"
+    first = name.split()[0] if name else ""
+    h, t = mailer.render(f"Join the {club} team", [
+        f"Aloha{', ' + first if first else ''}. {a['name']} invited you to help run the {club} site.",
+        ("rows", [("Role", "Admin" if role == "admin" else "Member"), ("Link works until", mailer.fmt_day(expires))]),
+        "The link works once. If it expires, ask for a new one."],
+        button=("Set up your account", link))
+    mailer.queue(email, f"You're invited to the {club} team", h, t, kind="invite-team")
+    return link, expires
+
+
+@router.get("/invites")
+def invites(a=AdminOnly):
+    return [invite_out(r) for r in db.q("SELECT * FROM invites WHERE used_at IS NULL ORDER BY created DESC")]
+
+
+@router.post("/invites")
+def invite_create(body: dict = Body(...), a=AdminOnly):
+    email = store.need_email(body.get("email"))
+    name = clean(body.get("name"), 80)
+    if db.one("SELECT id FROM admins WHERE email=?", (email,)):
+        raise Invalid("That person already has an account.", "email")
+    role = "admin" if body.get("role") == "admin" else "member"
+    perms = clean_perms(body.get("perms") if "perms" in body else DEFAULT_MEMBER_PERMS) if role == "member" else []
+    db.run("DELETE FROM invites WHERE email=? AND used_at IS NULL", (email,))  # one open invite per person
+    iid = db.run("INSERT INTO invites(token, email, name, role, perms, invited_by, invited_by_name, created, expires) "
+                 "VALUES (?,?,?,?,?,?,?,?,?)", (secrets.token_hex(16), email, name, role, json.dumps(perms), a["id"], a["name"],
+                                                db.now_iso(), db.now_iso()))
+    link, expires = send_invite(a, iid, email, name, role)
+    audit(a, f"Invited {'an admin' if role == 'admin' else 'a member'}", name or mask_email(email))
+    ready = mailer.smtp_config()["ready"]
+    # Without email set up, the admin gets the link once to pass along; it isn't stored anywhere readable.
+    return {"ok": True, "emailed": ready, "link": None if ready else link, "expires": expires}
+
+
+@router.post("/invites/{iid}/resend")
+def invite_resend(iid: int, a=AdminOnly):
+    r = db.one("SELECT * FROM invites WHERE id=? AND used_at IS NULL", (iid,))
+    if not r:
+        raise Invalid("That invite was already used or removed.", status=404)
+    link, expires = send_invite(a, iid, r["email"], r["name"], r["role"])
+    audit(a, "Resent an invite", r["name"] or mask_email(r["email"]))
+    ready = mailer.smtp_config()["ready"]
+    return {"ok": True, "emailed": ready, "link": None if ready else link, "expires": expires}
+
+
+@router.delete("/invites/{iid}")
+def invite_revoke(iid: int, a=AdminOnly):
+    r = db.one("SELECT * FROM invites WHERE id=? AND used_at IS NULL", (iid,))
+    if r:
+        db.run("DELETE FROM invites WHERE id=?", (iid,))
+        audit(a, "Cancelled an invite", r["name"] or mask_email(r["email"]))
+    return {"ok": True}
+
+
+def open_invite(tok):
+    tok = str(tok or "")
+    r = db.one("SELECT * FROM invites WHERE token=? AND used_at IS NULL", (auth._digest(tok),)) if 20 <= len(tok) <= 100 else None
+    if not r or r["expires"] < db.now_iso():
+        raise Invalid("This invite link expired or was already used. Ask an admin for a new one.", status=404)
+    return r
+
+
+@router.post("/join/check")
+def join_check(request: Request, body: dict = Body(...)):
+    from .main import throttle
+    throttle(request, "join", 20)
+    r = open_invite(body.get("token"))
+    return {"email": r["email"], "name": r["name"], "role": r["role"], "invited_by": r["invited_by_name"],
+            "club": db.get_setting("club_name"), "password_login": auth.password_login_enabled(),
+            "sso": {"name": auth.oidc_config()["name"]} if auth.oidc_config() else None, "min_password": auth.MIN_LEN}
+
+
+@router.post("/join")
+def join(request: Request, response: Response, body: dict = Body(...)):
+    from .main import throttle
+    throttle(request, "join", 20)
+    r = open_invite(body.get("token"))
+    if db.one("SELECT id FROM admins WHERE email=?", (r["email"],)):
+        db.run("UPDATE invites SET used_at=? WHERE id=?", (db.now_iso(), r["id"]))
+        raise Invalid("You already have an account. Sign in instead.", status=409)
+    name = store.need_name(body.get("name") or r["name"])
+    pw_hash = ""
+    if auth.password_login_enabled():
+        pw_hash = auth.hash_password(auth.check_new_password(body.get("password") or "", email=r["email"], name=name))
+    # Mark the link used before creating the account, so the same link can't be raced into two accounts.
+    with db.tx() as c:
+        if c.execute("UPDATE invites SET used_at=? WHERE id=? AND used_at IS NULL", (db.now_iso(), r["id"])).rowcount != 1:
+            raise Invalid("This invite link was already used.", status=404)
+        aid = c.execute("INSERT INTO admins(email, name, pw_hash, role, perms, created) VALUES (?,?,?,?,?,?)",
+                        (r["email"], name, pw_hash, r["role"], r["perms"], db.now_iso())).lastrowid
+    audit({"id": aid, "name": name, "ip": client_ip(request)}, "Joined from an invite", f"invited by {r['invited_by_name']}")
+    if pw_hash:
+        start_session(response, aid, request)
+    return {"ok": True, "signed_in": bool(pw_hash)}
+
+
 # ---------- activity log ----------
 
 @router.get("/activity")

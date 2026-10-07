@@ -39,6 +39,7 @@ export async function render(path) {
   const app = $("#app");
   const parts = path.replace(/^\/(team|login)\/?/, "").split("/").filter(Boolean);
   const [section = "", id] = parts;
+  if (path === "/join") return joinScreen(app);
   let state;
   try { state = await api("/api/admin/state"); } catch (e) { clear(app).append(h("div.auth", h("div.auth-card", h("p", e.message)))); return; }
   STATE = state;
@@ -143,6 +144,44 @@ function authScreen(app, mode, path = "/team") {
     err && SSO_ERRORS[err] ? h("p.form-error", { style: { marginBottom: "14px" } }, SSO_ERRORS[err]) : null,
     sso, sso && form ? h("div.auth-or", "or") : null, form)));
   form?.querySelector("input").focus();
+}
+
+// ---------- joining from an invite ----------
+// The token rides in the URL fragment, which browsers never send to the server. We read it, then clear it
+// from the address bar so it doesn't linger in history or screenshots.
+async function joinScreen(app) {
+  setTitle("Join");
+  const KEY = "mahina.join";
+  let tok = location.hash.length > 1 ? location.hash.slice(1) : "";
+  try { if (tok) sessionStorage.setItem(KEY, tok); else tok = sessionStorage.getItem(KEY) || ""; } catch {}
+  if (location.hash && !CFG.hashRouting && !CFG.memoryRouting) history.replaceState(null, "", location.pathname);
+  const m = moonInfo();
+  const card = h("div.auth-card", link("/", { class: "wordmark" }, moonSVG(m.phase, 22, { maria: false }), window.SITE?.club_name || "Mahina Club"), loading());
+  clear(app).append(h("div.auth", card));
+  let info;
+  try { info = await api("/api/admin/join/check", { method: "POST", body: { token: tok } }); }
+  catch (e) {
+    $(".loading", card)?.remove();
+    card.append(h("h1", "Link not valid"), h("p.muted", e.message), link("/login", { class: "btn block ghost" }, "Go to sign in"));
+    return;
+  }
+  STATE = { ...STATE, min_password: info.min_password, password_login: info.password_login, sso: info.sso };
+  const form = h("form",
+    h("input", { type: "email", name: "username", value: info.email, autocomplete: "username", hidden: true, readonly: true }),
+    field("Email", h("input", { type: "email", value: info.email, readonly: true, tabindex: -1, class: "readonly" })),
+    field("Your name", input("name", { value: info.name || "", required: true, autocomplete: "name" })),
+    info.password_login ? pwField("Choose a password", "password", { autocomplete: "new-password", isNew: true }) : null,
+    h("p.form-error"),
+    h("button.btn.block", { type: "submit" }, info.password_login ? "Create account" : `Continue with ${info.sso?.name || "single sign-on"}`));
+  onSubmit(form, async (v) => {
+    const r = await api("/api/admin/join", { method: "POST", body: { token: tok, name: v.name, password: v.password } });
+    try { sessionStorage.removeItem(KEY); } catch {}
+    if (r.signed_in) go("/team", { replace: true }); else location.href = "/api/admin/sso/start";
+  });
+  $(".loading", card)?.remove();
+  card.append(h("h1", `Join the ${info.club || "Mahina Club"} team`),
+    h("p.join-from", `${info.invited_by || "An admin"} invited you as ${info.role === "admin" ? "an admin" : "a member"}.`), form);
+  form.querySelector("[name=name]").value ? form.querySelector("[name=password]")?.focus() : form.querySelector("[name=name]").focus();
 }
 
 function head(title, { back, actions, sub } = {}) {
@@ -1141,47 +1180,96 @@ const PERM_HELP = {
 
 function accountForm(acct, perms, defaults, onDone) {
   const isNew = !acct;
-  const st = { role: acct?.role || "member", perms: new Set(acct ? acct.perms : defaults) };
+  const pwOn = STATE.password_login !== false;
+  const st = { role: acct?.role || "member", perms: new Set(acct ? acct.perms : defaults), mode: "invite" };
   const roleBox = h("div");
   const permBox = h("div.perm-list");
   const drawRole = () => {
     clear(roleBox).append(h("div.seg", { role: "group", "aria-label": "Role" }, [["member", "Member"], ["admin", "Admin"]].map(([v, t]) =>
       h("button", { type: "button", "aria-pressed": String(st.role === v), disabled: acct?.id === ME.id, onclick: () => { st.role = v; drawRole(); } }, t))),
-      h("p.muted.small", { style: { margin: "8px 0 0" } }, st.role === "admin" ? "Admins can do everything, including settings, colors, the home page, team accounts, and the activity log." : "Members get only what you tick below. They can't change settings or the site's layout."));
+      hint(st.role === "admin" ? "Admins can do everything, including settings, colors, the home page, accounts, and the activity log." : "Members get only what you tick below. They can't change settings or the site's layout."));
     permBox.hidden = st.role === "admin";
   };
   clear(permBox).append(Object.entries(perms).map(([k, name]) => h("label.perm", h("input", { type: "checkbox", checked: st.perms.has(k), onchange: (e) => e.target.checked ? st.perms.add(k) : st.perms.delete(k) }),
     h("span", h("b", name), h("span.muted.small", PERM_HELP[k] || "")))));
   drawRole();
-  const pwOn = STATE.password_login !== false;
+  // New people get an emailed invite by default, so no one has to make up a password for them.
+  const pwBox = h("div");
+  const submit = h("button.btn", { type: "submit" });
+  const drawMode = () => {
+    const invite = isNew && st.mode === "invite";
+    clear(pwBox).append(
+      !invite && pwOn && (isNew || acct.id !== ME.id) ? pwField(isNew ? "Starting password" : "New password", "password", { autocomplete: "new-password", isNew: true,
+        hintText: `${isNew ? "" : "Optional. Signs them out everywhere. "}At least ${STATE.min_password || 15} characters. Share it privately; they can change it after signing in.` }) : null,
+      !invite && !pwOn && isNew ? h("p.muted.small", { style: { margin: 0 } }, `They sign in with ${STATE.sso?.name || "single sign-on"} using this email.`) : null);
+    const pw = pwBox.querySelector("[name=password]");
+    if (pw && !isNew) pw.required = false;
+    clear(submit).append(invite ? icon("send", 16) : null, invite ? "Send invite" : isNew ? "Add" : "Save");
+    $$("[data-mode]", form).forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === st.mode)));
+    const nameIn = form.querySelector("[name=name]");
+    nameIn.required = !invite;
+  };
   const form = h("form.stack",
-    h("div.two", field("Name", input("name", { value: acct?.name || "", required: true })),
-      isNew ? field("Email", input("email", { type: "email", required: true })) : h("label.field", h("span.field-label", "Email"), h("div.muted", { style: { padding: "12px 0" } }, acct.email))),
+    isNew ? h("div.seg", { role: "group", "aria-label": "How to add them" },
+      h("button", { type: "button", "data-mode": "invite", onclick: () => { st.mode = "invite"; drawMode(); } }, icon("mail", 16), "Email an invite"),
+      h("button", { type: "button", "data-mode": "direct", onclick: () => { st.mode = "direct"; drawMode(); } }, pwOn ? "Set a password" : "Add directly"),
+      hint("An invite emails a one-time link. They pick their own name and password. The link expires in 7 days.")) : null,
+    h("div.two", field("Name", input("name", { value: acct?.name || "", autocomplete: "off" })),
+      isNew ? field("Email", input("email", { type: "email", required: true, autocomplete: "off" })) : h("label.field", h("span.field-label", "Email"), h("div.muted", { style: { padding: "12px 0" } }, acct.email))),
     h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Role"), roleBox),
     h("div", permBox),
-    pwOn && (isNew || acct.id !== ME.id) ? pwField(isNew ? "Starting password" : "New password", "password", { autocomplete: "new-password", isNew: true,
-      hintText: `${isNew ? "" : "Optional. Signs them out everywhere. "}At least ${STATE.min_password || 15} characters. Share it privately; they can change it after signing in.` }) : null,
-    !pwOn && isNew ? h("p.muted.small", { style: { margin: 0 } }, `They sign in with ${STATE.sso?.name || "single sign-on"} using this email.`) : null,
+    pwBox,
     h("p.form-error"),
-    h("div.row.end", h("button.btn", { type: "submit" }, isNew ? "Add" : "Save")));
-  const pw = form.querySelector("[name=password]");
-  if (pw && !isNew) pw.required = false;
+    h("div.row.end", submit));
+  drawMode();
   onSubmit(form, async (v) => {
     const body = { name: v.name, role: st.role, perms: [...st.perms] };
+    if (isNew && st.mode === "invite") {
+      const r = await api("/api/admin/invites", { method: "POST", body: { ...body, email: v.email } });
+      return onDone(r.emailed ? `Invite sent to ${v.email}` : null, r.link ? { link: r.link, email: v.email, expires: r.expires } : null);
+    }
     if (v.password) body.password = v.password;
     if (isNew) await api("/api/admin/admins", { method: "POST", body: { ...body, email: v.email } });
     else await api(`/api/admin/admins/${acct.id}`, { method: "PUT", body });
-    onDone();
+    onDone(isNew ? "Added" : "Saved");
   });
   return form;
 }
 
+// Shown only when email isn't set up yet: the link appears once, for the admin to pass along privately.
+function showInviteLink({ link: url, email, expires }) {
+  modal(h("div",
+    h("h2", "Send this link yourself"),
+    h("p.muted", `Email isn't connected, so the invite for ${email} wasn't sent. Text or email this link to them privately. It works once and expires ${dateCell(expires)}.`),
+    h("div.invite-link", h("input", { value: url, readonly: true, "aria-label": "Invite link", onfocus: (e) => e.target.select() }),
+      h("button.btn", { type: "button", onclick: () => copy(url) }, icon("copy", 16), "Copy"))), { label: "Invite link", wide: true });
+}
+
 async function accounts() {
-  const data = await api("/api/admin/admins");
+  const [data, invites] = await Promise.all([api("/api/admin/admins"), api("/api/admin/invites")]);
   const reload = () => go("/team/accounts", { replace: true });
   const open = (acct) => {
-    const m = modal(h("div", h("h2", acct ? acct.name : "Add someone"), accountForm(acct, data.perms, data.default_member_perms, () => { m.close(); toast(acct ? "Saved" : "Added"); reload(); })), { label: "Account", wide: true });
+    const m = modal(h("div", h("h2", acct ? acct.name : "Add someone"), accountForm(acct, data.perms, data.default_member_perms, (msg, linkInfo) => {
+      m.close(); if (msg) toast(msg); reload(); if (linkInfo) setTimeout(() => showInviteLink(linkInfo), 150);
+    })), { label: "Account", wide: true });
   };
+  const pending = invites.length ? h("section.a-section", h("h2", "Invites"),
+    h("div.tbl-wrap", h("table.tbl",
+      h("thead", h("tr", h("th", "Person"), h("th", "Role"), h("th", "Invited by"), h("th", "Link"), h("th"))),
+      h("tbody", invites.map((i) => h("tr",
+        h("td", h("span.strong", i.name || i.email), i.name ? h("div.sub", i.email) : null),
+        h("td", pill(i.role === "admin" ? "published" : "draft", i.role === "admin" ? "Admin" : "Member")),
+        h("td.sub", `${i.invited_by}, ${ago(i.created)}`),
+        h("td.sub", i.expired ? pill("closed", "Expired") : `Works until ${dateCell(i.expires)}`),
+        h("td.actions", h("div.row", { style: { gap: "4px", flexWrap: "nowrap", justifyContent: "flex-end" } },
+          h("button.btn.small.ghost", { type: "button", onclick: async () => {
+            const r = await api(`/api/admin/invites/${i.id}/resend`, { method: "POST" });
+            if (r.emailed) toast(`New link sent to ${i.email}`); else showInviteLink({ link: r.link, email: i.email, expires: r.expires });
+            if (r.emailed) reload();
+          } }, icon("send", 16), "Resend"),
+          h("button.icon-btn", { type: "button", "aria-label": `Cancel invite for ${i.email}`, title: "Cancel invite", onclick: async () => {
+            if (await confirmBox(`Cancel the invite for ${i.email}? The link stops working.`, { ok: "Cancel invite" })) { await api(`/api/admin/invites/${i.id}`, { method: "DELETE" }); toast("Invite cancelled"); reload(); }
+          } }, icon("close", 16)))))))))) : null;
   const access = (a) => a.role === "admin" ? h("span", "Everything") : a.perms.length ? h("span", a.perms.map((p) => data.perms[p]).join(", ")) : h("span.muted", "Nothing yet");
   return h("div", head("Accounts", { actions: [h("button.btn", { type: "button", onclick: () => open(null) }, icon("plus", 18), "Add someone")] }),
     h("div.tbl-wrap", h("table.tbl",
@@ -1195,7 +1283,8 @@ async function accounts() {
           if (await confirmBox(`Remove ${a.name}'s account? They're signed out right away. Tasks assigned to them stay, with their name.`, { ok: "Remove" })) {
             await api(`/api/admin/admins/${a.id}`, { method: "DELETE" }); toast("Removed"); reload();
           }
-        } }, icon("trash", 16)))))))));
+        } }, icon("trash", 16)))))))),
+    pending);
 }
 
 // ---------- activity log (admins only) ----------

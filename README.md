@@ -70,6 +70,14 @@ Everyone signs in at `/login` (the **Login** link in the site footer) and lands 
 - **Admins** can do everything.
 - **Members** get only the areas an admin ticks: Event planning, Events, Sign-ups, Polls, Gallery, Messages, People, and Email. Members can never change settings, colors, the home page layout, the banner, team accounts, or edit pages in place.
 
+**Adding people:** under **Accounts > Add someone**, pick their role and access and choose **Email an invite**. They get a link to a page where they pick their own name and password, then land in the dashboard. No one can create an account without an invite.
+
+- Each link works once, only for the email it was sent to, and expires after 7 days. **Resend** makes a new link and the old one stops working. **Cancel** kills it.
+- The link's secret sits after the `#` in the address, so it never reaches the server's logs, and the page clears it from the address bar once it loads. The database stores only a hash of it.
+- If email isn't connected yet, the dashboard shows the link once so you can pass it along privately.
+- Invite links use the **Site address** in Settings, so make sure that's your public address.
+- You can still use **Set a password** to create an account directly.
+
 New members start with Event planning. In **Planning**, anyone with access sees each upcoming event's tasks, shopping list, and notes. They can take or assign work, check items off, and record what was spent. A person assigned something by someone else gets an email with a link to the plan.
 
 **Activity** lists sign-ins, failed sign-ins, and every change, by who and when. It keeps 400 days. Entries name people, not their full email addresses.

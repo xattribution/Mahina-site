@@ -97,7 +97,7 @@ function footer() {
       save: (t) => saveSettings({ disclaimer: t }) }), link("/login", {}, "Login"))));
 }
 
-const isConsolePath = (p) => p === "/login" || p === "/team" || p.startsWith("/team/");
+const isConsolePath = (p) => p === "/login" || p === "/join" || p === "/team" || p.startsWith("/team/");
 let shellBuilt = false;
 function buildShell() {
   const app = $("#app");
@@ -165,6 +165,7 @@ route("/contact", P.contact);
 route("/me/:token", P.mine);
 // One sign-in for everyone at /login. The dashboard at /team shows each person only what their account allows.
 route("/login", () => null);
+route("/join", () => null);
 route("/team", () => null);
 route("/team/:section", () => null);
 route("/team/:section/:id", () => null);

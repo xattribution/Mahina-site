@@ -105,6 +105,11 @@ def ics_for(events, name="Mahina Club"):
 
 # ---------- templates ----------
 
+def fmt_day(iso):
+    d = datetime.fromisoformat(iso)
+    return d.strftime("%a, %b ") + str(d.day) + " at " + d.strftime("%I:%M %p").lstrip("0")
+
+
 def fmt_when(ev):
     d = datetime.fromisoformat(ev["starts_at"])
     day = d.strftime("%A, %B ") + str(d.day)
