@@ -8,7 +8,7 @@ Website and admin console for the Mahina Club, the Space Forces–Indo-Pacific b
 |---|---|---|
 | Home | Tonight's moon and its Hawaiian night name, the featured event or poll, a live timeline, photos, polls, fundraising goal | Pick what's featured; show, hide, and reorder sections; set the top banner; edit text in place |
 | Events | Hover-to-expand timeline on the home page; full list and month calendar on the Events page, tag filters, RSVP with guests, add to Google/Apple/Outlook | Create, duplicate, draft, cancel; capacity; reminder schedule; notify attendees of changes; roster CSV |
-| Sign-ups | SignUpGenius-style slots: potluck dishes with a public list of what everyone is bringing and how many it feeds, a "Something else" write-in, timed volunteer shifts, quantities | Templates (potluck, shifts, blank), slot pictures, no-limit slots, servings totals against the RSVP count, reorder slots, remove people, CSV |
+| Sign-ups | SignUpGenius-style slots: potluck dishes with a public list of what everyone is bringing and how many it feeds, a "Something else" write-in, timed volunteer shifts, quantities | Templates (potluck, shifts, blank), optional specific items per slot that people claim (Turkey, Ham), slot pictures, no-limit slots, servings totals against the RSVP count, reorder slots, remove people, CSV |
 | Gallery | Masonry, lightbox, filter by tag or event; tag filters surface related events; visitors can share photos | Bulk upload, review queue, bulk tag/hide/delete, captions |
 | Polls | Forms-style questions: multiple choice, checkboxes, 1–5 rating, written | Builder, open/close dates, result visibility, one response per email, CSV |
 | Give | Venmo handle, QR code, goal progress, where the money goes | Edit handle, goal, amount raised |

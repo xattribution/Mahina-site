@@ -211,6 +211,8 @@ ADDED_COLUMNS = [
     ("slots", "is_other", "INTEGER DEFAULT 0"),
     ("signups", "servings", "INTEGER"),
     ("sheets", "allow_other", "INTEGER DEFAULT 0"),
+    ("slots", "choices", "TEXT DEFAULT '[]'"),
+    ("signups", "choice_id", "TEXT"),
 ]
 
 

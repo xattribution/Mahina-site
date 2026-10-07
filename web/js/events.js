@@ -484,6 +484,12 @@ function calButtons(ev) {
 }
 
 // ---------- sign-up sheet ----------
+// A small solid circle with someone's initials, or a check when names are hidden.
+function avatar(name) {
+  const initials = (name || "").replace(/\./g, "").split(/\s+/).filter(Boolean).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+  return h("span.avatar", { "aria-hidden": "true" }, initials || icon("check", 14));
+}
+
 const servingsText = (n) => `about ${n} serving${n === 1 ? "" : "s"}`;
 
 function sheetMeter(sheet) {
@@ -536,47 +542,72 @@ function slotRow(sheet, sl, open, redraw) {
     : h("div.fill-meter", { style: { textAlign: "left" } }, h("div.bar", h("span", { style: { width: `${(sl.taken / sl.capacity) * 100}%` } })));
   const count = [limited ? (sl.left ? `${sl.taken} of ${sl.capacity}` : `All ${sl.capacity} filled`) : sl.taken ? `${sl.taken} bringing` : "",
     sl.servings ? servingsText(sl.servings) : ""].filter(Boolean).join(", ");
-  // What people are bringing is public, laid out like a menu, so everyone can see the spread.
-  const withItems = (sl.people || []).filter((p) => p.item);
-  const dishes = withItems.length ? h("div.dishes", withItems.map((p) => h("div.dish",
-    h("b", p.item),
-    h("span", [p.name, p.servings ? `feeds ${p.servings}` : "", p.qty > 1 ? `×${p.qty}` : ""].filter(Boolean).join(", "))))) : null;
+  // What people are bringing is public. Each one carries the person's initials, so it reads as a promise, not a suggestion.
+  const choiceIds = new Set((sl.choices || []).map((c) => c.id));
+  const withItems = (sl.people || []).filter((p) => p.item && !choiceIds.has(p.choice));
+  const dishes = withItems.length ? h("div.dishes", { "aria-label": `Bringing for ${sl.title}` }, withItems.map((p) => h("div.dish",
+    avatar(p.name),
+    h("div", h("span.who", p.name ? `${p.name} is bringing` : "Someone is bringing"),
+      h("b", p.item),
+      p.servings || p.qty > 1 ? h("span.meta", [p.servings ? `Feeds ${p.servings}` : "", p.qty > 1 ? `×${p.qty}` : ""].filter(Boolean).join(", ")) : null)))) : null;
+  // Specific items the organizer listed. Open ones can be claimed with one tap.
+  const choiceList = sl.choices?.length ? h("div.choices", sl.choices.map((c) => h("div.choice", { class: c.left ? "" : "taken" },
+    h("span.choice-mark", c.left ? null : icon("check", 14)),
+    h("span.choice-title", c.title, c.need > 1 ? h("small", ` ${c.taken} of ${c.need}`) : null),
+    h("span.choice-by", c.by.length ? c.by.join(", ") : c.left ? "" : "Taken"),
+    open && c.left && sl.left > 0 && !EDIT.on ? h("button.btn.small.ghost", { type: "button", onclick: () => toggle(c.id) }, "I'll bring it") : null))) : null;
   const names = (sl.people || []).filter((p) => !p.item && p.name);
   const people = names.length ? h("div.slot-people", names.map((p) => h("span", p.name, p.qty > 1 ? ` ×${p.qty}` : null))) : null;
   const formHost = h("div.slot-form");
-  const btn = !open ? null : sl.left > 0
+  const choicesGone = sl.choices?.length && !sl.ask_item && !sl.choices.some((c) => c.left);
+  const btn = !open ? null : sl.left > 0 && !choicesGone
     ? h("button.btn.small", { class: sl.is_other ? "ghost" : "", type: "button", "aria-expanded": "false", onclick: () => toggle() }, sl.is_other ? "Add yours" : "Sign up")
     : h("span.full-label", "Full");
-  function toggle() {
-    const isOpen = formHost.childElementCount > 0;
+  function toggle(pick) {
+    const isOpen = formHost.childElementCount > 0 && !pick;
     $$(".slot-form").forEach((f) => clear(f));
     $$(".slot [aria-expanded=true]").forEach((b) => b.setAttribute("aria-expanded", "false"));
     if (isOpen) return;
-    btn.setAttribute("aria-expanded", "true");
+    btn?.setAttribute?.("aria-expanded", "true");
     const known = me.get();
+    const openChoices = (sl.choices || []).filter((c) => c.left);
+    const itemField = sl.ask_item || sl.is_other ? field("What are you bringing?", input("item", { required: true, maxlength: 120, placeholder: sl.is_other ? "Kalua pig" : sl.note || "" })) : null;
+    const choiceField = openChoices.length ? field("What you're bringing", h("select", { name: "choice", onchange: (e) => {
+      const write = e.target.value === "";
+      itemField.hidden = !write; itemField.querySelector("input").required = write;
+    } }, openChoices.map((c) => h("option", { value: c.id, selected: c.id === pick }, c.title)),
+      sl.ask_item ? h("option", { value: "" }, "Something else") : null)) : null;
+    if (choiceField && itemField) { itemField.hidden = true; itemField.querySelector("input").required = false; }
     const form = h("form",
       field("Name", input("name", { autocomplete: "name", value: known.name || "", required: true })),
       field("Email", input("email", { type: "email", autocomplete: "email", value: known.email || "", required: true })),
-      sl.ask_item || sl.is_other ? field("What are you bringing?", input("item", { required: true, maxlength: 120, placeholder: sl.is_other ? "Kalua pig" : sl.note || "" })) : null,
+      choiceField,
+      itemField,
       sl.ask_servings ? field("Feeds about", input("servings", { type: "number", min: 1, max: 500, inputmode: "numeric", required: true, placeholder: "12" }),
         { hintText: "Roughly how many people your dish will feed. It helps us see if there's enough of everything." }) : null,
-      limited && sl.left > 1 ? field("How many", h("select", { name: "qty" }, Array.from({ length: Math.min(sl.left, 10) }, (_, i) => h("option", { value: i + 1 }, i + 1)))) : null,
+      limited && sl.left > 1 && !openChoices.length ? field("How many", h("select", { name: "qty" }, Array.from({ length: Math.min(sl.left, 10) }, (_, i) => h("option", { value: i + 1 }, i + 1)))) : null,
       honeypot(),
       h("button.btn", { type: "submit" }, "Sign up"),
       h("p.form-error"));
     onSubmit(form, async (v) => {
+      const ch = (sl.choices || []).find((c) => c.id === v.choice);
+      if (ch) { v.item = ch.title; v.qty = 1; }
       await api(`/api/slots/${sl.id}/signup`, { method: "POST", body: v });
       me.set({ name: v.name, email: v.email });
+      if (ch) { ch.taken += 1; ch.left -= 1; }
       const qty = Number(v.qty || 1), serves = Number(v.servings || 0);
       sl.taken += qty; if (limited) { sl.left -= qty; sheet.filled += qty; }
       sl.servings += serves; sheet.servings = (sheet.servings || 0) + serves; sheet.people = (sheet.people || 0) + qty;
       const parts = v.name.trim().split(/\s+/);
-      (sl.people ||= []).push({ name: sheet.show_names ? parts[0] + (parts.length > 1 ? " " + parts.at(-1)[0] + "." : "") : "", item: v.item || "", qty, servings: serves || null });
+      const short = sheet.show_names ? parts[0] + (parts.length > 1 ? " " + parts.at(-1)[0] + "." : "") : "";
+      if (ch && short) ch.by.push(short);
+      (sl.people ||= []).push({ name: short, item: v.item || "", qty, servings: serves || null, choice: ch ? ch.id : null });
       toast(sl.is_other ? "Thanks! You're on the list." : `You're signed up for ${sl.title}`);
       redraw();
     });
     formHost.append(form);
     form.querySelector("input:not([value]), input[value='']")?.focus();
+    if (pick) formHost.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
   const slotPatch = (body) => api(`/api/admin/slots/${sl.id}`, { method: "PATCH", body });
   const editTools = EDIT.on ? h("span.ed-tools",
@@ -608,7 +639,7 @@ function slotRow(sheet, sl, open, redraw) {
       h("div.slot-title", title, sl.starts_at ? h("small", timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : sl.note && !sl.ask_item ? h("small", sl.note) : null),
       h("div.slot-fill", pips, count ? h("div.slot-count", count) : null, people),
       EDIT.on ? editTools : btn),
-    ...[dishes, formHost].filter(Boolean));
+    ...[choiceList, dishes, formHost].filter(Boolean));
   return row;
 }
 

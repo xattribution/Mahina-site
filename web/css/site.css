@@ -815,3 +815,28 @@ body.admin-mode .edit-bar { display: none; }
   .dishes { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 720px) { .sheet-head { flex-direction: column; align-items: flex-start; gap: 10px; } .sheet-meter { white-space: normal; } }
+
+/* ---------- who's bringing what ---------- */
+.dish { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; align-items: start; padding-left: 0; border-left: 0; }
+.avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--night); color: #fff; display: grid; place-items: center; font-size: 11px; font-weight: 800; letter-spacing: .02em; }
+.dish .who { display: block; font-size: 12px; font-weight: 700; color: var(--muted); margin: 0 0 1px; }
+.dish b { font-size: 16px; }
+.dish .meta { display: block; font-size: 13px; color: var(--muted); margin-top: 2px; }
+/* Specific items to claim inside a slot. */
+.choices { display: grid; margin: -4px 0 20px; border-top: 1px solid var(--line); }
+.slot.has-img .choices { margin-left: 84px; }
+.choice { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto; gap: 12px; align-items: center; min-height: 48px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.choice:last-child { border-bottom: 0; }
+.choice-mark { width: 22px; height: 22px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--line-2); display: grid; place-items: center; color: #fff; }
+.choice.taken .choice-mark { background: var(--good); box-shadow: none; }
+.choice-title { font-weight: 650; color: var(--ink); font-size: 15px; }
+.choice-title small { font-weight: 500; color: var(--muted); font-size: 13px; }
+.choice.taken .choice-title { color: var(--muted); }
+.choice-by { font-size: 14px; color: var(--text); font-weight: 600; }
+@media (max-width: 720px) {
+  .slot.has-img .choices { margin-left: 0; }
+  .choice { grid-template-columns: 22px minmax(0, 1fr) auto; }
+  .choice-by { grid-column: 2; grid-row: 2; font-size: 13px; }
+  .choice-by:empty { display: none; }
+}
+.dish .avatar { display: grid; color: #fff; margin: 0; font-size: 11px; font-weight: 800; }

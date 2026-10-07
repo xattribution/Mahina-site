@@ -345,3 +345,14 @@ form .seg .hint { margin: 0 8px 0 6px; }
   .row-edit > :nth-child(n+5) { grid-column: auto; }
   .row-edit .mv { display: none; }
 }
+
+/* slot items */
+.row-edit, .row-head { grid-template-columns: 28px 44px minmax(140px, 1.4fr) 84px minmax(96px, .65fr) minmax(96px, .65fr) 72px 72px 78px 40px; }
+.row-head > span:nth-child(9) { justify-content: center; }
+.items-btn { padding: 0 10px; gap: 4px; height: 32px; font-size: 13px; }
+.choice-edit { display: grid; gap: 8px; min-width: min(460px, 80vw); }
+.choice-edit-head, .choice-edit-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px 36px; gap: 8px; align-items: center; }
+.choice-edit-head { font-size: 12px; font-weight: 700; color: var(--muted); }
+.choice-edit-row input { height: 42px; }
+.choice-edit > .btn { justify-self: start; margin-top: 4px; }
+@media (max-width: 900px) { .row-edit { grid-template-columns: 44px minmax(0, 1fr) 84px; } }

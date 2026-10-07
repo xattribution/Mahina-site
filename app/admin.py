@@ -417,8 +417,8 @@ def event_duplicate(eid: int, a=can("events")):
         sid = db.run("INSERT INTO sheets(event_id, title, description, status, show_names, allow_other, sort, created) VALUES (?,?,?,?,?,?,?,?)",
                      (new, s["title"], s["description"], s["status"], s["show_names"], s["allow_other"], s["sort"], db.now_iso()))
         for sl in db.q("SELECT * FROM slots WHERE sheet_id=?", (s["id"],)):
-            db.run("INSERT INTO slots(sheet_id, title, note, capacity, ask_item, ask_servings, photo_id, is_other, sort) VALUES (?,?,?,?,?,?,?,?,?)",
-                   (sid, sl["title"], sl["note"], sl["capacity"], sl["ask_item"], sl["ask_servings"], sl["photo_id"], sl["is_other"], sl["sort"]))
+            db.run("INSERT INTO slots(sheet_id, title, note, capacity, ask_item, ask_servings, photo_id, is_other, choices, sort) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                   (sid, sl["title"], sl["note"], sl["capacity"], sl["ask_item"], sl["ask_servings"], sl["photo_id"], sl["is_other"], sl["choices"], sl["sort"]))
     audit(a, "Duplicated event", ev["title"])
     return {"id": new}
 
@@ -494,15 +494,17 @@ def save_slots(sid, slots):
         cap = 0 if raw in ("", "0") else max(1, min(int(raw) if raw.isdigit() else 1, 999))  # 0 = no limit
         photo = sl.get("photo_id")
         photo = int(photo) if str(photo or "").isdigit() and db.one("SELECT 1 FROM photos WHERE id=?", (int(photo),)) else None
+        existing = db.one("SELECT * FROM slots WHERE id=? AND sheet_id=? AND is_other=0", (sl["id"], sid)) if sl.get("id") else None
+        choices = json.dumps(store.clean_choices(sl.get("choices"), store.slot_choices(existing) if existing else None))
         vals = (title, clean(sl.get("note"), 200), cap, clean(sl.get("starts_at"), 16) or None,
-                clean(sl.get("ends_at"), 16) or None, 1 if sl.get("ask_item") else 0, 1 if sl.get("ask_servings") else 0, photo, i)
-        if sl.get("id") and db.one("SELECT id FROM slots WHERE id=? AND sheet_id=? AND is_other=0", (sl["id"], sid)):
-            db.run("UPDATE slots SET title=?, note=?, capacity=?, starts_at=?, ends_at=?, ask_item=?, ask_servings=?, photo_id=?, sort=? "
+                clean(sl.get("ends_at"), 16) or None, 1 if sl.get("ask_item") else 0, 1 if sl.get("ask_servings") else 0, photo, choices, i)
+        if existing:
+            db.run("UPDATE slots SET title=?, note=?, capacity=?, starts_at=?, ends_at=?, ask_item=?, ask_servings=?, photo_id=?, choices=?, sort=? "
                    "WHERE id=?", vals + (sl["id"],))
             keep.append(int(sl["id"]))
         else:
-            keep.append(db.run("INSERT INTO slots(title, note, capacity, starts_at, ends_at, ask_item, ask_servings, photo_id, sort, sheet_id) "
-                               "VALUES (?,?,?,?,?,?,?,?,?,?)", vals + (sid,)))
+            keep.append(db.run("INSERT INTO slots(title, note, capacity, starts_at, ends_at, ask_item, ask_servings, photo_id, choices, sort, sheet_id) "
+                               "VALUES (?,?,?,?,?,?,?,?,?,?,?)", vals + (sid,)))
     marks = ",".join("?" * len(keep)) or "NULL"
     db.run(f"DELETE FROM slots WHERE sheet_id=? AND is_other=0 AND id NOT IN ({marks})", (sid, *keep))
 

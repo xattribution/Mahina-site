@@ -415,6 +415,26 @@ function openSheetEditor(ev, sheet, template, onSaved) {
   const m = modal(h("div", h("h2", sheet ? "Edit sign-up" : "New sign-up"), node), { wide: true, label: "Sign-up editor" });
 }
 
+// Specific items inside a slot (Turkey, Ham, Rolls). Each can need more than one person.
+function editChoices(sl, onDone) {
+  const list = (sl.choices || []).map((c) => ({ ...c }));
+  const box = h("div.choice-edit");
+  const draw = () => clear(box).append(
+    list.length ? h("div.choice-edit-head", h("span", "Item"), h("span", "How many")) : null,
+    list.map((c, i) => h("div.choice-edit-row",
+      h("input", { type: "text", value: c.title, placeholder: "Turkey", "aria-label": `Item ${i + 1}`, maxlength: 80, oninput: (e) => (c.title = e.target.value),
+        onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); list.splice(i + 1, 0, { title: "", need: 1 }); draw(); $$("input[type=text]", box)[i + 1]?.focus(); } } }),
+      h("input", { type: "number", min: 1, max: 99, value: c.need || 1, "aria-label": "How many people", oninput: (e) => (c.need = Number(e.target.value) || 1) }),
+      h("button.icon-btn", { type: "button", "aria-label": "Remove item", onclick: () => { list.splice(i, 1); draw(); } }, icon("close", 16)))),
+    h("button.btn.small.ghost", { type: "button", onclick: () => { list.push({ title: "", need: 1 }); draw(); $$("input[type=text]", box).at(-1)?.focus(); } }, icon("plus", 16), "Add item"));
+  if (!list.length) list.push({ title: "", need: 1 });
+  draw();
+  const m = modal(h("div", h("h2", sl.title ? `Items for ${sl.title}` : "Items"), box,
+    h("div.row.end", { style: { marginTop: "20px" } },
+      h("button.btn", { type: "button", onclick: () => { sl.choices = list.filter((c) => c.title.trim()); m.close(); onDone(); } }, "Done"))), { label: "Items" });
+  $("input[type=text]", box)?.focus();
+}
+
 // Pick a picture for a sign-up slot: upload one, or reuse a gallery photo.
 function pickSlotImage(current, onPick) {
   const grid = h("div.pgrid", loading());
@@ -453,6 +473,8 @@ function sheetForm(s, ev, onSaved, events) {
         h("input", { type: "time", value: tval(sl.ends_at), "aria-label": "End time", oninput: (x) => (sl.ends_at = toIso(x.target.value)) }),
         h("label.check.center", h("input", { type: "checkbox", checked: sl.ask_item, "aria-label": "Ask what they're bringing", onchange: bind("ask_item") })),
         h("label.check.center", h("input", { type: "checkbox", checked: !!sl.ask_servings, "aria-label": "Ask how many it feeds", onchange: bind("ask_servings") })),
+        h("button.btn.small.ghost.items-btn", { type: "button", "aria-label": `Specific items for ${sl.title || "this slot"}`, onclick: () => editChoices(sl, drawRows) },
+          (sl.choices || []).length ? `${sl.choices.length}` : icon("plus", 14), "Items"),
         h("button.icon-btn", { type: "button", "aria-label": "Remove slot", onclick: () => { s.slots.splice(i, 1); drawRows(); } }, icon("trash", 18)));
     }));
   };
@@ -464,7 +486,8 @@ function sheetForm(s, ev, onSaved, events) {
     h("div",
       h("div.row-head", h("span"), h("span"), h("span", "Slot"), h("span", "How many", hint("Leave blank for no limit.")), h("span", "Starts"), h("span", "Ends"),
         h("span", "Ask what", hint("People say what they're bringing, like a dish name. Everyone can see the list.")),
-        h("span", "Servings", hint("People say about how many it feeds, so you can see if there's enough of each thing.")), h("span")),
+        h("span", "Servings", hint("People say about how many it feeds, so you can see if there's enough of each thing.")),
+        h("span", "", hint("Optional. List specific things for this slot, like Turkey or Ham. People pick one and it shows as taken.")), h("span")),
       rows,
       h("button.btn.small.ghost", { type: "button", style: { marginTop: "12px" }, onclick: () => { s.slots.push({ title: "", capacity: 1, ask_item: false, ask_servings: false }); drawRows(); $$(".row-edit input[aria-label='Slot name']", rows).at(-1)?.focus(); } }, icon("plus", 16), "Add slot")),
     h("div.two",

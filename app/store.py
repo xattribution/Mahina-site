@@ -154,6 +154,32 @@ def event_detail(ev, admin=False):
 OTHER_TITLE = "Something else"
 
 
+def slot_choices(sl):
+    try:
+        raw = json.loads(sl.get("choices") or "[]")
+    except ValueError:
+        return []
+    return [{"id": str(c.get("id")), "title": c.get("title", ""), "need": int(c.get("need") or 1)} for c in raw if isinstance(c, dict) and c.get("id")]
+
+
+def clean_choices(raw, old=None):
+    """Validate an admin's list of specific items for a slot. Keeps ids of items that already exist so claims stay attached."""
+    import secrets
+    known = {c["id"] for c in (old or [])}
+    out, seen = [], set()
+    for c in (raw or [])[:40]:
+        title = clean((c or {}).get("title"), 80)
+        if not title:
+            continue
+        cid = str(c.get("id") or "")
+        if cid not in known or cid in seen:
+            cid = secrets.token_hex(4)
+        seen.add(cid)
+        need = str(c.get("need") or 1)
+        out.append({"id": cid, "title": title, "need": max(1, min(int(need) if need.isdigit() else 1, 99))})
+    return out
+
+
 def sheet_out(s, admin=False):
     """A sign-up sheet. What people are bringing is always public, so everyone can see the spread.
     Names show as first name and last initial, and only when the sheet allows it. Emails never leave the admin side.
@@ -169,17 +195,25 @@ def sheet_out(s, admin=False):
         ups = db.q("SELECT * FROM signups WHERE slot_id=? ORDER BY id", (sl["id"],))
         taken = sum(u["qty"] for u in ups)
         cap = sl["capacity"] or 0
+        # Optional specific items inside a slot (Turkey, Ham...). People claim one, and it shows as taken.
+        choices = []
+        for ch in slot_choices(sl):
+            mine = [u for u in ups if u["choice_id"] == ch["id"]]
+            got = sum(u["qty"] for u in mine)
+            c = {"id": ch["id"], "title": ch["title"], "need": ch["need"], "taken": got, "left": max(0, ch["need"] - got)}
+            c["by"] = [short_name(u["name"]) for u in mine] if (s["show_names"] or admin) else []
+            choices.append(c)
         item = {"id": sl["id"], "title": sl["title"], "note": sl["note"], "capacity": cap, "unlimited": cap == 0,
                 "starts_at": sl["starts_at"], "ends_at": sl["ends_at"], "ask_item": bool(sl["ask_item"]),
                 "ask_servings": bool(sl["ask_servings"]), "is_other": bool(sl["is_other"]),
                 "photo_id": sl["photo_id"], "image": photos.get(sl["photo_id"]),
                 "taken": taken, "left": 999 if cap == 0 else max(0, cap - taken),
-                "servings": sum(u["servings"] or 0 for u in ups)}
+                "servings": sum(u["servings"] or 0 for u in ups), "choices": choices}
         if admin:
-            item["signups"] = [{k: u[k] for k in ("id", "name", "email", "phone", "qty", "item", "servings", "created")} for u in ups]
+            item["signups"] = [{k: u[k] for k in ("id", "name", "email", "phone", "qty", "item", "servings", "choice_id", "created")} for u in ups]
         else:
             item["people"] = [{"name": short_name(u["name"]) if s["show_names"] else "", "item": u["item"], "qty": u["qty"],
-                               "servings": u["servings"]} for u in ups]
+                               "servings": u["servings"], "choice": u["choice_id"]} for u in ups]
         out_slots.append(item)
     closed = s["status"] != "open" or (s["closes_at"] and s["closes_at"] < db.now_iso())
     limited = [x for x in out_slots if not x["unlimited"]]
@@ -238,6 +272,14 @@ def signup(slot_id, body):
         raise Invalid("This sign-up isn't taking other items.")
     qty = max(1, min(int(body.get("qty") or 1), 50)) if slot["capacity"] else 1
     item = clean(body.get("item"), 120)
+    choices = {c["id"]: c for c in slot_choices(slot)}
+    choice = choices.get(str(body.get("choice") or "")) if choices else None
+    if body.get("choice") and choices and not choice:
+        raise Invalid("That item isn't on the list anymore. Refresh the page.", "choice")
+    if choice:
+        item, qty = choice["title"], 1
+    elif choices and not slot["ask_item"]:
+        raise Invalid("Pick what you're bringing.", "choice")
     if (slot["ask_item"] or slot["is_other"]) and not item:
         raise Invalid("Tell everyone what you're bringing.", "item")
     servings = None
@@ -246,14 +288,29 @@ def signup(slot_id, body):
         if not raw.isdigit() or not 1 <= int(raw) <= 500:
             raise Invalid("About how many people will it feed? Enter a number.", "servings")
         servings = int(raw)
-    if slot["capacity"]:
-        taken = db.one("SELECT COALESCE(SUM(qty),0) n FROM signups WHERE slot_id=?", (slot_id,))["n"]
-        if taken + qty > slot["capacity"]:
-            left = slot["capacity"] - taken
-            raise Invalid("This slot just filled up." if left <= 0 else f"Only {left} left in this slot.", "qty")
     tok = my_token(email)
-    sid = db.run("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, token, created) VALUES (?,?,?,?,?,?,?,?,?)",
-                 (slot_id, name, email, clean(body.get("phone"), 30), qty, item, servings, tok, db.now_iso()))
+    # Check room and insert under one write lock, so two people can't both take the last spot or the same item.
+    c = db.conn()
+    if c.in_transaction:
+        c.commit()
+    c.execute("BEGIN IMMEDIATE")
+    try:
+        if slot["capacity"]:
+            taken = c.execute("SELECT COALESCE(SUM(qty),0) FROM signups WHERE slot_id=?", (slot_id,)).fetchone()[0]
+            if taken + qty > slot["capacity"]:
+                left = slot["capacity"] - taken
+                raise Invalid("This slot just filled up." if left <= 0 else f"Only {left} left in this slot.", "qty")
+        if choice:
+            got = c.execute("SELECT COALESCE(SUM(qty),0) FROM signups WHERE slot_id=? AND choice_id=?", (slot_id, choice["id"])).fetchone()[0]
+            if got >= choice["need"]:
+                raise Invalid(f"Someone just took {choice['title']}. Pick another.", "choice")
+        sid = c.execute("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, choice_id, token, created) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?)", (slot_id, name, email, clean(body.get("phone"), 30), qty, item, servings,
+                                                          choice["id"] if choice else None, tok, db.now_iso())).lastrowid
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
     ev = db.one("SELECT * FROM events WHERE id=?", (sheet["event_id"],)) if sheet["event_id"] else None
     rows = [("Sign-up", sheet["title"]), ("Slot", slot["title"] + (f" ×{qty}" if qty > 1 else "")), ("Bringing", item),
             ("Serves", f"About {servings}" if servings else "")]

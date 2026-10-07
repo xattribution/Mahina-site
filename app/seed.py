@@ -132,11 +132,18 @@ def run():
     sh = db.run("INSERT INTO sheets(event_id, title, description, allow_other, created) VALUES (?,?,?,1,?)",
                 (potluck, "Bring a dish", "Tell us what you're bringing so we don't end up with twelve mac salads.", db.now_iso()))
     slots = [("Main dish", 6, 1, 1, "buffet-table.jpg"), ("Side dish", 8, 1, 1, "food-variety.jpg"), ("Dessert", 6, 1, 1, "table-dishes.jpg"),
-             ("Drinks and ice", 3, 1, 0, None), ("Plates and napkins", 2, 0, 0, None)]
+             ("Drinks and ice", 4, 0, 0, None), ("Plates and napkins", 2, 0, 0, None)]
+    drinks = [{"id": "ice", "title": "Ice, 4 bags", "need": 2}, {"id": "water", "title": "Water, 2 cases", "need": 1},
+              {"id": "juice", "title": "Juice and soda", "need": 1}]
     for i, (t, cap, ask, serves, img) in enumerate(slots):
         pid = photo(img, status="cover") if img else None
-        sid = db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, ask_servings, photo_id, sort) VALUES (?,?,?,?,?,?,?)",
-                     (sh, t, cap, ask, serves, pid, i))
+        sid = db.run("INSERT INTO slots(sheet_id, title, capacity, ask_item, ask_servings, photo_id, choices, sort) VALUES (?,?,?,?,?,?,?,?)",
+                     (sh, t, cap, ask, serves, pid, json.dumps(drinks if i == 3 else []), i))
+        if i == 3:
+            for name, ch in zip(random.sample(NAMES, 2), [drinks[0], drinks[1]]):
+                db.run("INSERT INTO signups(slot_id, name, email, qty, item, choice_id, token, created) VALUES (?,?,?,1,?,?,?,?)",
+                       (sid, name, email_for(name), ch["title"], ch["id"], db.token(), at(-2, 10)))
+            continue
         for name in random.sample(NAMES, {0: 4, 1: 5, 2: 6, 3: 1, 4: 0}[i]):
             item = random.choice(DISHES) if ask else ""
             db.run("INSERT INTO signups(slot_id, name, email, qty, item, servings, token, created) VALUES (?,?,?,?,?,?,?,?)",
