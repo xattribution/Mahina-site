@@ -189,7 +189,7 @@ def order_out(o, admin=False):
         out["venmo"] = {"handle": venmo_handle(), "link": pay_link(o)}
     if admin:
         out.update(id=o["id"], name=o["name"], email=o["email"], method=o["method"], note=o["note"], paid_at=o["paid_at"],
-                   paid_by=o["paid_by"], picked_up_at=o["picked_up_at"])
+                   paid_by=o["paid_by"], picked_up_at=o["picked_up_at"], sent_to=_json(o.get("sent_to"), []))
     else:
         out["pickup"] = db.get_setting("shop_note") or ""
     return out
@@ -220,7 +220,56 @@ def create_order(body, channel, by=None):
     o = db.one("SELECT * FROM orders WHERE id=?", (oid,))
     if online:
         order_email(o, "placed")
+        alert_team(o, "new")
     return o
+
+
+def shop_sender():
+    """The shop's own From and Reply-To, when an admin set them. Otherwise shop email goes out like any club email."""
+    m = db.get_setting("shop_mail") or {}
+    if not (m.get("from") or m.get("reply_to") or m.get("from_name")):
+        return None
+    return {"name": m.get("from_name") or "", "from": m.get("from") or "", "reply_to": m.get("reply_to") or m.get("from") or ""}
+
+
+def shop_people():
+    """Accounts that can see the shop. Order emails to the team carry the buyer's details, so only these people get them."""
+    return [r for r in db.q("SELECT id, name, email, role, perms FROM admins ORDER BY name COLLATE NOCASE")
+            if r["role"] == "admin" or "shop" in _json(r["perms"], [])]
+
+
+def status_text(o):
+    if o["status"] == "pending":
+        return "Waiting for payment"
+    if o["status"] == "cancelled":
+        return "Cancelled"
+    return "Paid, handed out" if o["picked_up_at"] else "Paid, to hand out"
+
+
+def team_email(o, people, title, lead, note="", reply_to=""):
+    rows = [("Order", o["code"]), ("Status", status_text(o)), ("Items", ", ".join(line_text(i) for i in _json(o["items"], []))),
+            ("Total", fmt(o["total"])), ("Paid with", {"cash": "Cash", "venmo": "Venmo"}.get(o["method"], "")),
+            ("Name", o["name"]), ("Email", o["email"]), ("Where", "Online" if o["channel"] == "online" else "At the table")]
+    blocks = [lead] + ([f"Note: {note}"] if note else []) + [("rows", rows)]
+    h, t = mailer.render(title, blocks, button=("Open in Shop", f"{mailer.site_url()}/team/shop?tab=orders&order={o['code']}"))
+    sender = shop_sender() or {}
+    if reply_to:
+        sender = {**sender, "reply_to": reply_to}
+    for p in people:
+        mailer.queue(p["email"], title, h, t, kind="order-team", sender=sender or None)
+
+
+def alert_team(o, kind):
+    """Email the people an admin picked whenever an online order comes in or gets paid."""
+    ids = set(db.get_setting("shop_notify") or [])
+    people = [p for p in shop_people() if p["id"] in ids]
+    if not people:
+        return
+    if kind == "new":
+        team_email(o, people, f"New order {o['code']}: {fmt(o['total'])}", f"{o['name'] or 'Someone'} placed an order online.")
+    else:
+        how = "Matched from Venmo's email." if o["paid_by"] == "Venmo email" else f"Marked paid by {o['paid_by']}."
+        team_email(o, people, f"Paid: order {o['code']}", f"{o['name'] or 'An order'} is paid and ready to hand out. {how}")
 
 
 def order_email(o, kind):
@@ -236,15 +285,15 @@ def order_email(o, kind):
                                                     f"Pay {fmt(o['total'])} with Venmo to @{venmo_handle()} and keep {o['code']} in the note.",
                                                     *([pickup] if pickup else [])],
                              button=("Pay with Venmo", pay_link(o)), footer_link=("View your order", url))
-        mailer.queue(o["email"], f"Your order {o['code']}", h, t, kind="order")
+        mailer.queue(o["email"], f"Your order {o['code']}", h, t, kind="order", sender=shop_sender())
     elif kind == "paid":
         h, t = mailer.render("Payment received", [f"Mahalo{', ' + first if first else ''}. Your order is paid.", ("rows", rows),
                                                   *([pickup] if pickup else [])], footer_link=("View your order", url))
-        mailer.queue(o["email"], f"Paid: order {o['code']}", h, t, kind="order")
+        mailer.queue(o["email"], f"Paid: order {o['code']}", h, t, kind="order", sender=shop_sender())
     elif kind == "cancelled":
         h, t = mailer.render(f"Order {o['code']} cancelled", [("rows", rows),
                                                               "If you already paid, reply to this email and we'll sort it out."])
-        mailer.queue(o["email"], f"Cancelled: order {o['code']}", h, t, kind="order")
+        mailer.queue(o["email"], f"Cancelled: order {o['code']}", h, t, kind="order", sender=shop_sender())
 
 
 def mark_paid(o, method, by_name):
@@ -255,6 +304,7 @@ def mark_paid(o, method, by_name):
     o = db.one("SELECT * FROM orders WHERE id=?", (o["id"],))
     if o["channel"] == "online":
         order_email(o, "paid")
+        alert_team(o, "paid")
     return o
 
 
@@ -485,12 +535,14 @@ def settings_out():
     imap = dict(s.get("shop_imap") or {})
     imap["password"] = MASK if imap.get("password") else ""
     return {"enabled": bool(s.get("shop_enabled")), "title": s.get("shop_title") or "Shop", "note": s.get("shop_note") or "",
-            "imap": imap, "imap_status": IMAP_STATUS}
+            "imap": imap, "imap_status": IMAP_STATUS, "mail": {**db.DEFAULT_SETTINGS["shop_mail"], **(s.get("shop_mail") or {})},
+            "notify": [i for i in (s.get("shop_notify") or []) if i in {p["id"] for p in shop_people()}]}
 
 
 @team.get("")
 def team_home(a=SHOP):
-    out = {"products": products(admin=True), "stats": stats(), "venmo": venmo_handle(), "enabled": enabled()}
+    out = {"products": products(admin=True), "stats": stats(), "venmo": venmo_handle(), "enabled": enabled(),
+           "people": [{"id": p["id"], "name": p["name"]} for p in shop_people()]}
     if a["role"] == "admin":
         out["settings"] = settings_out()
     return out
@@ -518,6 +570,20 @@ def team_settings(body: dict = Body(...), a=ADMIN):
                "password": cur.get("password", "") if raw.get("password") == MASK else str(raw.get("password") or "")[:500]}
         db.set_setting("shop_imap", new)
         changed.append("Venmo email check")
+    if "mail" in body:
+        raw = body["mail"] or {}
+        new = {"from_name": clean(raw.get("from_name"), 80)}
+        for k in ("from", "reply_to"):
+            v = clean(raw.get(k), 200).lower()
+            if v and not store.EMAIL_RE.match(v):
+                raise Invalid("Enter an email address like shop@example.com.", "mail_" + k)
+            new[k] = v
+        db.set_setting("shop_mail", new)
+        changed.append("shop email address")
+    if "notify" in body:
+        ok = {p["id"] for p in shop_people()}
+        db.set_setting("shop_notify", sorted({int(i) for i in body["notify"] or [] if str(i).isdigit() and int(i) in ok}))
+        changed.append("order alerts")
     if changed:
         audit(a, "Changed shop settings", ", ".join(changed))
     return settings_out()
@@ -620,6 +686,24 @@ def order_change(oid: int, body: dict = Body(...), a=SHOP):
     o = change(o, action, a, body.get("method") or "")
     audit(a, ACTION_NAMES.get(action, "Changed an order"), f"{o['code']}" + (f", {body.get('method')}" if action == "paid" else ""))
     return order_out(o, admin=True)
+
+
+@team.post("/orders/{oid}/send")
+def order_send(oid: int, body: dict = Body(...), a=SHOP):
+    """Email an order to chosen team members, with an optional note. Replies go to whoever sent it."""
+    o = _order(oid)
+    people = {p["id"]: p for p in shop_people()}
+    to = [people[int(i)] for i in (body.get("to") or [])[:20] if str(i).isdigit() and int(i) in people]
+    if not to:
+        raise Invalid("Pick who to send it to.", "to")
+    note = clean(body.get("note"), 1000, multiline=True)
+    me = db.one("SELECT email FROM admins WHERE id=?", (a["id"],))
+    team_email(o, to, f"Order {o['code']}: {status_text(o).lower()}", f"{a['name']} sent you this order.", note,
+               reply_to=me["email"] if me else "")
+    log = _json(o.get("sent_to"), [])[-19:] + [{"at": db.now_iso(), "by": a["name"], "to": [p["name"] for p in to], "note": note}]
+    db.run("UPDATE orders SET sent_to=? WHERE id=?", (json.dumps(log), oid))
+    audit(a, "Sent an order to the team", f"{o['code']} to {', '.join(p['name'] for p in to)}")
+    return order_out(_order(oid), admin=True)
 
 
 @team.get("/orders.csv")

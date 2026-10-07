@@ -11,6 +11,7 @@ export async function shopAdmin() {
   let data = await api("/api/admin/shop");
   const tabs = [["sell", "Sell"], ["orders", "Orders"], ["products", "Products"], ...(isAdmin() ? [["settings", "Settings"]] : [])];
   let tab = tabs.some(([t]) => t === query().get("tab")) ? query().get("tab") : "sell";
+  let focus = query().get("order");  // order emails link straight to their order
   const body = h("div");
   const reload = async () => { data = await api("/api/admin/shop"); };
   const setTab = (t) => {
@@ -19,7 +20,9 @@ export async function shopAdmin() {
     replaceUrl(`/team/shop${t === "sell" ? "" : "?tab=" + t}`);
     const view = { sell: sellTab, orders: ordersTab, products: productsTab, settings: settingsTab }[t];
     clear(body).append(loading());
-    Promise.resolve(view(data, reload, setTab)).then((n) => clear(body).append(n)).catch((e) => clear(body).append(h("p.form-error", e.message)));
+    const f = t === "orders" ? focus : null;
+    focus = null;
+    Promise.resolve(view(data, reload, setTab, f)).then((n) => clear(body).append(n)).catch((e) => clear(body).append(h("p.form-error", e.message)));
   };
   const status = data.enabled ? link("/shop", { class: "btn small ghost" }, icon("external", 16), "View shop") : h("span.pill.hidden", "Hidden from the site");
   const wrap = h("div", head("Shop", { actions: [status] }),
@@ -142,8 +145,31 @@ function statusPill(o) {
   return o.picked_up ? pill("published", o.channel === "table" ? "Sold" : "Picked up") : pill("open", "Paid");
 }
 
-async function ordersTab(data) {
-  const st = { view: "open" };
+// Email an order to people on the team who can see the shop, with a note. Replies come back to the sender.
+function sendDialog(o, people, onSent) {
+  const form = h("form",
+    h("div.field", h("span.field-label", "Send to"),
+      people.length ? h("div.send-to", people.map((p) => h("label.check", h("input", { type: "checkbox", name: "to", value: p.id }), p.name)))
+        : h("p.muted", "No one else can see the shop yet. Give someone the Shop permission under Accounts."),
+      h("span.field-error")),
+    field("Note", h("textarea", { name: "note", rows: 3, maxlength: 1000, placeholder: "Can you bring this to Saturday's meeting?" }), { optional: true }),
+    h("p.form-error"),
+    h("div.row.end", h("button.btn.ghost", { type: "button", onclick: () => m.close() }, "Cancel"), h("button.btn", { type: "submit" }, icon("send", 18), "Send")));
+  onSubmit(form, async (v) => {
+    const to = $$("input[name=to]:checked", form).map((x) => Number(x.value));
+    const r = await api(`/api/admin/shop/orders/${o.id}/send`, { method: "POST", body: { to, note: v.note } });
+    m.close(); toast(`Sent to ${r.sent_to.at(-1).to.join(", ")}`); onSent();
+  });
+  const m = modal(h("div", h("h2", `Send ${o.code}`), form), { label: "Send order" });
+}
+
+const sentLine = (o) => {
+  const last = (o.sent_to || []).at(-1);
+  return last ? h("div.sub", { title: last.note || "" }, `Sent to ${last.to.join(", ")} ${ago(last.at)}`) : null;
+};
+
+async function ordersTab(data, reload, setTab, focus) {
+  const st = { view: focus ? "all" : "open" };
   const s = data.stats;
   const tableBox = h("div");
   const seg = h("div.seg", VIEWS.map(([v, t]) => h("button", { type: "button", "aria-pressed": String(st.view === v),
@@ -167,6 +193,7 @@ async function ordersTab(data) {
     if (o.status === "pending") b.push(h("button.btn.small", { type: "button", onclick: () => payDialog(o) }, "Mark paid"));
     if (o.status === "paid" && !o.picked_up) b.push(h("button.btn.small.dark", { type: "button", onclick: () => act(o, "picked_up") }, "Handed out"));
     if (o.status === "paid" && o.picked_up && o.channel === "online") b.push(h("button.btn.small.ghost", { type: "button", onclick: () => act(o, "not_picked_up") }, "Undo"));
+    b.push(h("button.icon-btn", { type: "button", "aria-label": `Send ${o.code} to someone`, title: "Send to someone", onclick: () => sendDialog(o, data.people || [], draw) }, icon("send", 16)));
     if (o.status !== "cancelled") b.push(h("button.icon-btn", { type: "button", "aria-label": `Cancel ${o.code}`, title: "Cancel order", onclick: async () => {
       const msg = o.status === "paid" ? `Cancel ${o.code}? Refund the ${money(o.total)} in Venmo or cash yourself.` : `Cancel ${o.code}?`;
       if (await confirmBox(msg + (o.picked_up ? "" : " The items go back in stock."), { ok: "Cancel order" })) act(o, "cancel");
@@ -178,13 +205,14 @@ async function ordersTab(data) {
     const list = await api(`/api/admin/shop/orders?view=${st.view}`);
     clear(tableBox).append(list.length ? h("div.tbl-wrap", h("table.tbl.orders-tbl",
       h("thead", h("tr", h("th", "Order"), h("th", "Name"), h("th", "Items"), h("th.num", "Total"), h("th", "Status"), h("th"))),
-      h("tbody", list.map((o) => h("tr",
+      h("tbody", list.map((o) => h("tr", { class: o.code === focus ? "focus" : "", "data-code": o.code },
         h("td", h("span.strong.num", o.code), h("div.sub", ago(o.created))),
         h("td", o.name ? h("span", o.name) : h("span.muted", o.channel === "table" ? "At the table" : "–"), o.email ? h("div.sub", o.email) : null),
         h("td", itemsText(o.items), o.note ? h("div.sub.warn", o.note) : null),
         h("td.num", money(o.total), o.method ? h("div.sub", o.method === "cash" ? "Cash" : "Venmo") : null),
-        h("td", statusPill(o), o.paid_by === "Venmo email" ? h("div.sub", "Auto-matched") : null),
+        h("td", statusPill(o), o.paid_by === "Venmo email" ? h("div.sub", "Auto-matched") : null, sentLine(o)),
         h("td.actions", actions(o))))))) : empty(st.view === "all" ? "No orders yet." : "Nothing to do here."));
+    if (focus) requestAnimationFrame(() => $("tr.focus", tableBox)?.scrollIntoView({ block: "center" }));
   };
   draw();
   const units = s.units.length ? h("details.units", h("summary", "Items sold"),
@@ -319,12 +347,29 @@ function settingsTab(data, reload) {
       } }, "Check now")));
   onSubmit(imap, async (v) => { const r = await save({ imap: { host: v.host, folder: v.folder, user: v.user, password: v.password } }); drawStatus(r.imap_status); });
 
+  const mm = s.mail || {};
+  const mailForm = h("form",
+    field("Sender name", input("mail_from_name", { value: mm.from_name || "", maxlength: 80, placeholder: `${window.SITE?.club_name || "Mahina Club"} Shop` }), { optional: true }),
+    h("div.two",
+      field("Send from", input("mail_from", { type: "email", value: mm.from || "", placeholder: "shop@example.com" }),
+        { optional: true, hintText: "Your email service has to allow sending from this address. With Brevo, Resend, or SendGrid, use an address on the club's verified domain." }),
+      field("Replies go to", input("mail_reply_to", { type: "email", value: mm.reply_to || "", placeholder: "treasurer@example.com" }), { optional: true })),
+    h("p.form-error"), h("div.row", h("button.btn", { type: "submit" }, "Save")));
+  onSubmit(mailForm, (v) => save({ mail: { from_name: v.mail_from_name, from: v.mail_from, reply_to: v.mail_reply_to } }));
+  const notify = new Set(s.notify || []);
+  const alerts = h("div.stack", (data.people || []).length ? h("div.send-to", data.people.map((p) => h("label.check",
+    h("input", { type: "checkbox", checked: notify.has(p.id), onchange: async (e) => {
+      if (e.target.checked) notify.add(p.id); else notify.delete(p.id);
+      try { await save({ notify: [...notify] }, "Alerts saved"); } catch (err) { toast(err.message, "error"); }
+    } }), p.name))) : h("p.muted", "No one can see the shop yet."));
   const sec = (title, body, hintText) => h("section.settings-sec", h("div", h("h2", title, hintText ? hint(hintText) : null)), body);
   return h("div",
     sec("On the site", h("div.stack", show)),
     sec("Page", page),
     sec("Venmo", h("div.stack", data.venmo ? h("p", "Payments go to ", h("b", "@" + data.venmo), ". ", aLink("/settings#give", { class: "text-link" }, "Change")) :
       h("p.form-error", "Add the club's Venmo handle first. ", aLink("/settings#give", { class: "text-link" }, "Settings")))),
+    sec("Shop emails", mailForm, "Order emails to buyers and the team go out under this name and address. Leave it blank to use the club's usual email."),
+    sec("Order alerts", alerts, "These people get an email when an online order comes in and when it's paid. Only people who can see the shop are listed."),
     sec("Confirm payments automatically", imap,
       "When someone pays, Venmo emails the club. The site reads those emails (it never changes or deletes them) and marks an order paid when the order code and the exact amount both match. Leave this blank to mark orders paid by hand."));
 }

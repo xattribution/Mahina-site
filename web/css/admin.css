@@ -484,3 +484,5 @@ form .seg .hint { margin: 0 8px 0 6px; }
 .prod-cell .slot-thumb { margin-right: 0; width: 40px; height: 40px; border-radius: 6px; }
 .shop-stats .stat b { font-size: clamp(24px, 2.6vw, 34px); letter-spacing: -0.03em; }
 .shop-stats .stat span { display: block; line-height: 1.35; margin-top: 6px; }
+.send-to { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 180px), 1fr)); gap: 8px 16px; padding: 4px 0; }
+.orders-tbl tr.focus td { background: var(--wash); box-shadow: inset 0 2px 0 var(--night), inset 0 -2px 0 var(--night); }

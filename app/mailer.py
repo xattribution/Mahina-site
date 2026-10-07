@@ -162,21 +162,24 @@ def render(title, blocks, button=None, footer_link=None):
 
 # ---------- queue ----------
 
-def queue(to_email, subject, html_body, text_body, ics=None, kind=""):
+def queue(to_email, subject, html_body, text_body, ics=None, kind="", sender=None):
+    """sender: optional {"name", "from", "reply_to"} to send under another address (the shop uses this)."""
     status = "queued" if smtp_config()["ready"] else "held"
+    s = sender or {}
     return db.run(
-        "INSERT INTO outbox(to_email, subject, html, text, ics, kind, status, created) VALUES (?,?,?,?,?,?,?,?)",
-        (to_email, subject, html_body, text_body, ics, kind, status, db.now_iso()))
+        "INSERT INTO outbox(to_email, subject, html, text, ics, kind, status, created, from_name, from_addr, reply_to) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (to_email, subject, html_body, text_body, ics, kind, status, db.now_iso(), s.get("name") or "", s.get("from") or "", s.get("reply_to") or ""))
 
 
 def send_one(cfg, row):
     msg = EmailMessage()
     club = db.get_setting("club_name") or "Mahina Club"
     msg["Subject"] = row["subject"]
-    msg["From"] = formataddr((club, cfg["from"]))
+    sender = row.get("from_addr") or cfg["from"]
+    msg["From"] = formataddr((row.get("from_name") or club, sender))
     msg["To"] = row["to_email"]
-    msg["Message-ID"] = make_msgid(domain=cfg["from"].split("@")[-1] or None)
-    reply = db.get_setting("email")
+    msg["Message-ID"] = make_msgid(domain=sender.split("@")[-1] or None)
+    reply = row.get("reply_to") or db.get_setting("email")
     if reply:
         msg["Reply-To"] = reply
     msg.set_content(row["text"])

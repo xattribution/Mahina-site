@@ -173,6 +173,8 @@ DEFAULT_SETTINGS = {
     "shop_title": "Shop",
     "shop_note": "",
     "shop_imap": {"host": "", "user": "", "password": "", "folder": "INBOX"},
+    "shop_mail": {"from_name": "", "from": "", "reply_to": ""},
+    "shop_notify": [],
 }
 
 
@@ -237,6 +239,11 @@ ADDED_COLUMNS = [
     ("signups", "news", "INTEGER"),
     ("events", "donate", "INTEGER DEFAULT 0"),
     ("events", "donate_note", "TEXT DEFAULT ''"),
+    # Shop emails can go out under their own sender and reply-to address.
+    ("outbox", "from_name", "TEXT DEFAULT ''"),
+    ("outbox", "from_addr", "TEXT DEFAULT ''"),
+    ("outbox", "reply_to", "TEXT DEFAULT ''"),
+    ("orders", "sent_to", "TEXT DEFAULT '[]'"),
 ]
 
 

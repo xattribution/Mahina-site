@@ -153,12 +153,21 @@
       if (body.action === "cancel") Object.assign(o, { status: "cancelled" });
       return wait(withPay(o));
     }
+    if ((m = path.match(/^\/api\/admin\/shop\/orders\/(\d+)\/send$/))) {
+      const o = shopOrders().find((x) => x.id === Number(m[1]));
+      const names = (D["/api/admin/shop"].people || []).filter((p) => (body.to || []).includes(p.id)).map((p) => p.name);
+      if (!names.length) throw new DemoError("Pick who to send it to.", 400, "to");
+      (o.sent_to ||= []).push({ at: new Date().toISOString().slice(0, 19), by: D["/api/admin/state"].admin.name, to: names, note: body.note || "" });
+      return wait(o);
+    }
     if (path === "/api/admin/shop/check-mail") return wait({ at: new Date().toISOString().slice(0, 19), ok: false, message: "The preview can't reach a mailbox." });
     if (path === "/api/admin/shop/settings") {
       const s = D["/api/admin/shop"].settings;
       if ("enabled" in body) { s.enabled = D["/api/admin/shop"].enabled = !!body.enabled; D["/api/site"].shop = body.enabled ? { title: s.title } : null; }
       if ("title" in body) { s.title = body.title || "Shop"; if (D["/api/site"].shop) D["/api/site"].shop.title = s.title; if (D["/api/shop"]) D["/api/shop"].title = s.title; }
       if ("note" in body) { s.note = body.note; if (D["/api/shop"]) D["/api/shop"].note = body.note; }
+      if (body.mail) s.mail = { ...body.mail };
+      if (body.notify) s.notify = [...body.notify];
       if (body.imap) s.imap = { ...body.imap, password: body.imap.password ? "••••••••" : "" };
       return wait(s);
     }
