@@ -149,8 +149,8 @@ def event_detail(ev, admin=False):
     e["description"] = ev["description"]
     e["sheets"] = [sheet_out(s, admin) for s in db.q("SELECT * FROM sheets WHERE event_id=? ORDER BY sort, id", (ev["id"],))
                    if admin or s["status"] != "hidden"]
-    e["polls"] = [{"slug": p["slug"], "title": p["title"], "status": p["status"]} for p in
-                  db.q("SELECT slug, title, status FROM polls WHERE event_id=? AND status!='draft'", (ev["id"],))]
+    e["polls"] = [poll_out(p, with_questions=False) for p in db.q("SELECT * FROM polls WHERE event_id=?" + ("" if admin else " AND status!='draft'") + " ORDER BY created",
+                                (ev["id"],))]
     if e["capacity"]:
         e["spots_left"] = max(0, e["capacity"] - e["going"])
     return e

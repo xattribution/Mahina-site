@@ -678,11 +678,20 @@ def save_questions(pid, questions):
     db.run(f"DELETE FROM questions WHERE poll_id=? AND id NOT IN ({','.join('?' * len(keep))})", (pid, *keep))
 
 
+def poll_event(v):
+    """A poll can belong to one event, or stand on its own (None)."""
+    if v in (None, "", 0, "0"):
+        return None
+    if not str(v).isdigit() or not db.one("SELECT 1 FROM events WHERE id=?", (int(v),)):
+        raise Invalid("That event no longer exists.", "event_id")
+    return int(v)
+
+
 def poll_fields(body):
     title = clean(body.get("title"), 140)
     if not title:
         raise Invalid("Give the poll a title.", "title")
-    return (title, clean(body.get("intro"), 600), body.get("event_id") or None,
+    return (title, clean(body.get("intro"), 600), poll_event(body.get("event_id")),
             body.get("status") if body.get("status") in ("draft", "open", "closed") else "open",
             clean(body.get("closes_at"), 16) or None,
             body.get("results") if body.get("results") in ("public", "after", "admin") else "after",
@@ -721,8 +730,12 @@ def poll_patch(pid: int, body: dict = Body(...), a=can("polls")):
     title = clean(body.get("title", p["title"]), 140)
     if not title:
         raise Invalid("Give the poll a title.", "title")
-    db.run("UPDATE polls SET title=?, intro=? WHERE id=?", (title, clean(body.get("intro", p["intro"]), 600), pid))
-    audit(a, "Edited poll", title)
+    eid = poll_event(body["event_id"]) if "event_id" in body else p["event_id"]
+    db.run("UPDATE polls SET title=?, intro=?, event_id=? WHERE id=?", (title, clean(body.get("intro", p["intro"]), 600), eid, pid))
+    if eid != p["event_id"]:
+        audit(a, "Linked a poll to an event" if eid else "Unlinked a poll from its event", f"{title}" + (f" → {title_of('events', eid)}" if eid else ""))
+    else:
+        audit(a, "Edited poll", title)
     return {"ok": True}
 
 

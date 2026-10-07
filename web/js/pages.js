@@ -229,8 +229,8 @@ async function heroFeature(spot, upcoming, polls) {
 
 function pollRow(p) {
   return link(`/polls/${p.slug}`, { class: "poll-row" },
-    h("div", h("h3", p.title), h("div.muted", p.closed ? `Closed, ${plural(p.responses, "response")}` :
-      [plural(p.responses, "response"), p.closes_at ? `closes ${shortDate(parse(p.closes_at))}` : null].filter(Boolean).join(", "))),
+    h("div", h("h3", p.title), h("div.muted", [p.event?.title, p.closed ? `Closed, ${plural(p.responses, "response")}` :
+      [plural(p.responses, "response"), p.closes_at ? `closes ${shortDate(parse(p.closes_at))}` : null].filter(Boolean).join(", ")].filter(Boolean).join(" · "))),
     h("span.btn.small", { class: p.closed ? "ghost" : "" }, p.closed ? "Results" : "Vote"));
 }
 

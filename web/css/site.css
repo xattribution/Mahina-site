@@ -948,3 +948,9 @@ body.has-edit-bar .cart-bar { bottom: calc(86px + env(safe-area-inset-bottom, 0p
   .order-qr { display: none; }
   .order-actions .btn:first-child { flex: 1; }
 }
+
+/* polls on an event page */
+.ev-polls { margin-top: 32px; }
+.ev-polls h2 { margin-bottom: 4px; }
+.ev-polls .poll-row:first-of-type { border-top: 1px solid var(--line); }
+.ev-polls .poll-row h3 { font-size: 18px; }

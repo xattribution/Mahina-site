@@ -259,12 +259,12 @@ async function eventEditor(id) {
   const tab = query().get("tab") || "details";
   if (isNew) return h("div", head("New event", { back: ["/events", "Events"] }), eventForm(null, tags));
   const tabs = [["details", "Details"], ["signups", "Sign-ups", ev.sheets.length], ["rsvps", "RSVPs", ev.rsvps.filter((r) => r.status === "going").length],
-    ["planning", "Planning"], can("email") ? ["invite", "Invite"] : null].filter(Boolean);
+    ["planning", "Planning"], can("polls") ? ["polls", "Polls", ev.polls.length] : null, can("email") ? ["invite", "Invite"] : null].filter(Boolean);
   const body = h("div");
   const setTab = (t) => {
     replaceUrl(`/team/events/${id}?tab=${t}`);
     $$(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.t === t)));
-    clear(body).append(t === "signups" ? eventSheets(ev) : t === "rsvps" ? rsvpTab(ev) : t === "invite" ? inviteTab(ev) : t === "planning" ? planBoard(ev.id) : eventForm(ev, tags));
+    clear(body).append(t === "signups" ? eventSheets(ev) : t === "rsvps" ? rsvpTab(ev) : t === "invite" ? inviteTab(ev) : t === "planning" ? planBoard(ev.id) : t === "polls" ? eventPolls(ev) : eventForm(ev, tags));
   };
   const page = h("div",
     head(ev.title, { back: ["/events", "Events"], sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`,
@@ -655,7 +655,7 @@ async function pollsList() {
 async function pollEditor(id) {
   const isNew = id === "new";
   const [p, events] = await Promise.all([isNew ? null : api(`/api/admin/polls/${id}`), api("/api/admin/events")]);
-  const poll = p || { title: "", intro: "", status: "open", results: "after", collect_name: true, one_per_email: true, closes_at: "", event_id: null,
+  const poll = p || { title: "", intro: "", status: "open", results: "after", collect_name: true, one_per_email: true, closes_at: "", event_id: Number(query().get("event")) || null,
     questions: [{ kind: "single", prompt: "", options: ["", ""], required: true }] };
   const body = h("div");
   const tab = isNew ? "build" : query().get("tab") || (poll.responses ? "results" : "build");
@@ -675,6 +675,47 @@ async function pollEditor(id) {
     body);
   setTab(tab);
   return page;
+}
+
+// Polls tied to this event. A poll can also stand on its own; those can be added here.
+function eventPolls(ev) {
+  const wrap = h("div", loading());
+  const draw = async () => {
+    const all = await api("/api/admin/polls");
+    const linked = all.filter((p) => p.event_id === ev.id);
+    const loose = all.filter((p) => !p.event_id);
+    ev.polls = linked;
+    const n = $(".tabs button[data-t=polls] .n");
+    if (n) n.textContent = linked.length;
+    const link_ = async (p, eventId) => {
+      await api(`/api/admin/polls/${p.id}`, { method: "PATCH", body: { event_id: eventId } });
+      toast(eventId ? "Poll added to this event" : "Poll is on its own now");
+      draw();
+    };
+    const add = loose.length ? h("select.poll-add", { "aria-label": "Add a poll that's on its own", onchange: (e) => e.target.value && link_(loose.find((p) => String(p.id) === e.target.value), ev.id) },
+      h("option", { value: "" }, "Add an existing poll"), loose.map((p) => h("option", { value: p.id }, p.title))) : null;
+    clear(wrap).append(
+      h("div.a-toolbar", h("span"), h("div.row", add, aLink(`/polls/new?event=${ev.id}`, { class: "btn" }, icon("plus", 18), "New poll"))),
+      linked.length ? h("div.tbl-wrap", h("table.tbl",
+        h("thead", h("tr", h("th", "Poll"), h("th", "Status"), h("th.num", "Responses"), h("th", "Closes"), h("th"))),
+        h("tbody", linked.map((p) => h("tr.click", { onclick: (e) => !e.target.closest("button") && go(`/team/polls/${p.id}`) },
+          h("td", h("span.strong", p.title)),
+          h("td", pill(p.closed && p.status === "open" ? "closed" : p.status)), h("td.num", p.responses), h("td.sub", p.closes_at ? dateCell(p.closes_at) : "–"),
+          h("td.actions", h("button.icon-btn", { type: "button", "aria-label": `Take ${p.title} off this event`, title: "Take off this event", onclick: () => link_(p, null) }, icon("close", 16))))))))
+        : empty("No polls for this event yet."));
+  };
+  draw().catch((e) => clear(wrap).append(h("p.form-error", e.message)));
+  return wrap;
+}
+
+// Event picker for a poll: on its own, or one event (upcoming first, then past).
+function eventPicker(events, value) {
+  const now = isoLocal(clubNow());
+  const opt = (e) => h("option", { value: e.id, selected: String(e.id) === String(value ?? "") }, `${e.title}, ${dateCell(e.starts_at)}`);
+  const up = events.filter((e) => e.starts_at >= now).sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+  const past = events.filter((e) => e.starts_at < now).sort((a, b) => b.starts_at.localeCompare(a.starts_at));
+  return h("select", { name: "event_id" }, h("option", { value: "", selected: !value }, "None, it stands on its own"),
+    up.length ? h("optgroup", { label: "Upcoming" }, up.map(opt)) : null, past.length ? h("optgroup", { label: "Past" }, past.map(opt)) : null);
 }
 
 function pollBuilder(poll, events) {
@@ -720,7 +761,7 @@ function pollBuilder(poll, events) {
     h("div.panel-block",
       field("Results", sel("results", [["after", "Show after the poll closes"], ["public", "Show right after voting"], ["admin", "Only admins"]], poll.results)),
       field("Closes", input("closes_at", { type: "datetime-local", value: poll.closes_at || "" }), { optional: true }),
-      field("Event", sel("event_id", [["", "None"], ...events.map((e) => [e.id, `${e.title}, ${dateCell(e.starts_at)}`])], poll.event_id), { optional: true })),
+      field("Event", eventPicker(events, poll.event_id), { optional: true, hintText: "Linked polls show on the event's page. Every poll still shows on the Polls page." })),
     h("div.panel-block",
       sw("collect_name", "Ask for name and email", poll.collect_name),
       sw("one_per_email", "One response per email", poll.one_per_email, { hintText: "Sending again updates the earlier answers." })));

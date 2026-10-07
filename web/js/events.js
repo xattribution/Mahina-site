@@ -419,8 +419,11 @@ export async function eventPage({ slug }) {
           placeEl),
         ev.tags.length ? h("div.tags", ev.tags.map((t) => tagChip(t, { as: "a" }))) : null,
         desc || EDIT.on ? ed(h("div.ev-desc", desc || ""), { multiline: true, label: "Details", placeholder: "Details", save: (t) => save({ description: t }) }) : null,
-        ev.polls.length ? h("div", { style: { marginTop: "28px" } }, ev.polls.map((p) =>
-          link(`/polls/${p.slug}`, { class: "btn ghost" }, icon("poll", 18), p.title))) : null,
+        ev.polls.length ? h("section.ev-polls", { "aria-label": "Polls" }, h("h2.h3", ev.polls.length > 1 ? "Polls" : "Poll"), ev.polls.map((p) =>
+          link(`/polls/${p.slug}`, { class: "poll-row" },
+            h("div", h("h3", p.title), h("div.muted", p.closed ? `Closed, ${plural(p.responses, "response")}`
+              : [plural(p.responses, "response"), p.closes_at ? `closes ${shortDate(parse(p.closes_at))}` : null].filter(Boolean).join(", "))),
+            h("span.btn.small", { class: p.closed ? "ghost" : "" }, p.closed ? "Results" : "Vote")))) : null,
         EDIT.on ? h("p", { style: { marginTop: "28px" } }, h("a.ed-action", { href: href(`/admin/events/${ev.id}`) }, icon("gear", 16), "More event settings")) : null),
       side),
     ev.sheets.length ? h("section.wrap#signups", ev.sheets.map((s) => sheetView(s, { past })))
