@@ -12,6 +12,7 @@ Website and admin console for the Mahina Club, the Space Forces–Indo-Pacific b
 | Gallery | Masonry, lightbox, filter by tag or event; tag filters surface related events; visitors can share photos | Bulk upload, review queue, bulk tag/hide/delete, captions |
 | Polls | Forms-style questions: multiple choice, checkboxes, 1–5 rating, written | Builder, open/close dates, result visibility, one response per email, CSV |
 | Give | Venmo handle, QR code, goal progress, where the money goes; optional Venmo QR on any event | Edit handle, goal, amount raised; turn on the QR per event with a note |
+| Shop | Hidden until an admin turns it on. Shirts, patches, mugs; pick a size, check out with name and email, then pay by Venmo with the amount and order code filled in. The order page updates when payment lands | A Sell screen for the table (Venmo QR or cash with change), orders to mark paid and handed out, products with sizes, stock and pictures, sales totals, CSV. Optional automatic Venmo confirmation |
 | Planning | | Per-event tasks and volunteer jobs assigned to team members, a shopping list with costs and who bought what, and team notes. Never public |
 | Contact | Message form, officers, club email | Inbox with read/archive |
 | My sign-ups | Every confirmation email links to a page where people change or cancel, or remove themselves completely | |
@@ -121,6 +122,19 @@ Verify the club's sending domain with the provider (SPF and DKIM) so mail doesn'
 
 Reminders go to everyone who RSVPed or signed up, on the schedule set per event (1 week, 2 days, 1 day, 3 hours). The mail worker checks every minute.
 
+## Shop
+
+Turn it on under **Shop > Settings**. Until then the page, its menu link, and its API don't exist for visitors, but the team can still add products and sell at the table.
+
+Every order gets a short code like `MC-7Q4K2`. The Venmo link and QR open Venmo with the club as recipient and the exact amount and code filled in as the note, so each payment can be matched to its order.
+
+- **At the table:** tap items on **Shop > Sell**, then **Venmo** (shows a QR for the buyer to scan) or **Cash** (works out change). Venmo sales flip to Paid on their own when automatic confirmation is on, or tap **They paid** after seeing the buyer's screen.
+- **Online:** orders wait for payment, then show under **To hand out** until someone marks them handed out. Unpaid orders cancel after 14 days and their items go back in stock.
+- **Automatic confirmation (optional):** in **Shop > Settings**, give the site read-only IMAP access to the mailbox that gets Venmo's "paid you" emails (for Gmail, an app password). Every few minutes, while orders are waiting, it reads the last 3 days of Venmo emails and marks an order paid only when the email passes the mail server's DKIM check for venmo.com, the code matches, and the amount is exact. A wrong amount leaves the order waiting with a note. It never changes or deletes email.
+- Venmo's rules expect a business or charity profile for selling goods. Check which kind the club's account is.
+
+Card payments (PayPal Checkout or Stripe) are noted in `UPGRADE_PATHS.md`.
+
 ## Calendar feed
 
 `/calendar.ics` is a subscribable feed of every published event. The footer links it as `webcal://`.
@@ -128,7 +142,7 @@ Reminders go to everyone who RSVPed or signed up, on the schedule set per event 
 ## Project layout
 
 ```
-app/       FastAPI backend: main.py (public API), admin.py, store.py (rules), mailer.py (email, .ics, reminders), seed.py
+app/       FastAPI backend: main.py (public API), admin.py, store.py (rules), shop.py, mailer.py (email, .ics, reminders), seed.py
 web/       Front end, no build step: index.html, css/, js/ (ES modules)
 seed/      Sample photos for MAHINA_SEED
 tools/     build_demo.py makes the offline preview

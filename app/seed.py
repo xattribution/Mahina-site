@@ -294,6 +294,28 @@ def run():
                "VALUES (?,?,?,?,?,?,?,?,?,?,?)", (potluck, kind, title, who, qty, est, cost, done, who if done else "", "Kalani Akana", at(-5)))
     db.run("INSERT INTO plan_notes(event_id, author, body, created) VALUES (?,?,?,?)",
            (potluck, "Kalani Akana", "Pavilion is ours from 9. Setup crew meets at the pavilion at 9:30.", at(-2, 18)))
+    # shop: a few things to sell, and a couple of orders
+    sizes = ["S", "M", "L", "XL", "2XL"]
+    pids = {}
+    for i, (name, desc, price, img, opts, stock) in enumerate([
+        ("Club T-shirt", "Navy cotton tee with the moon on the front.", 2000, "shop-shirt.jpg", sizes, {"S": 6, "M": 10, "L": 9, "XL": 4, "2XL": 0}),
+        ("Morale patch", "3 inch round patch with hook-and-loop backing.", 800, "shop-patch.jpg", [], {"": 40}),
+        ("Coffee mug", "15 oz ceramic mug.", 1500, "shop-mug.jpg", [], {}),
+    ]):
+        pids[name] = db.run("INSERT INTO products(name, description, price, photo_id, options, stock, sort, created) VALUES (?,?,?,?,?,?,?,?)",
+                            (name, desc, price, photo(img, status="cover"), json.dumps(opts), json.dumps(stock), i, at(-20)))
+    for code, name, items, total, status, method, channel, when, picked in [
+        ("MC-7Q4K2", "Maria Santos", [("Club T-shirt", "M", 2, 2000)], 4000, "paid", "venmo", "online", at(-3, 19), None),
+        ("MC-H8RWD", "Derek Nguyen", [("Morale patch", "", 1, 800), ("Coffee mug", "", 1, 1500)], 2300, "pending", "", "online", at(-1, 8), None),
+        ("MC-3ZX9P", "", [("Morale patch", "", 3, 800)], 2400, "paid", "cash", "table", at(-6, 17), at(-6, 17)),
+    ]:
+        lines = [{"product_id": pids[n], "name": n, "option": o, "qty": q, "price": p} for n, o, q, p in items]
+        db.run("INSERT INTO orders(code, name, email, items, total, status, method, channel, created, paid_at, paid_by, picked_up_at) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (code, name, email_for(name) if name else "", json.dumps(lines), total, status, method,
+                                                    channel, when, when if status == "paid" else None,
+                                                    "Venmo email" if method == "venmo" else "Tom Okada" if status == "paid" else "", picked))
+    db.set_setting("shop_enabled", True)
+    db.set_setting("shop_note", "Pick up your order at the next club event, or message us to arrange another time.")
     slug = db.one("SELECT slug FROM events WHERE id=?", (potluck,))["slug"]
     db.set_setting("banner", {"text": "Potluck dish sign-ups are open", "link": f"/events/{slug}", "active": True})
     print("Seeded demo content.")

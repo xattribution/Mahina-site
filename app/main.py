@@ -139,6 +139,7 @@ def site():
         "officers": s["officers"], "public_uploads": s["public_uploads"], "disclaimer": s["disclaimer"],
         "home_sections": s["home_sections"], "labels": {**db.DEFAULT_SETTINGS["labels"], **(s.get("labels") or {})},
         "spotlight": spot, "tags": store.all_tags(),
+        "shop": {"title": s.get("shop_title") or "Shop"} if s.get("shop_enabled") else None,
         "polls_open": db.one("SELECT COUNT(*) n FROM polls WHERE status='open' AND (closes_at IS NULL OR closes_at > ?)",
                              (db.now_iso(),))["n"],
     }
@@ -468,6 +469,10 @@ def venmo_qr():
 # ---------- admin, media, SPA ----------
 
 app.include_router(admin_router)
+from .shop import public as shop_public, team as shop_team  # noqa: E402
+
+app.include_router(shop_public)
+app.include_router(shop_team)
 
 
 @app.get("/media/{name}")

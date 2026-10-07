@@ -257,6 +257,9 @@ def worker():
             try:
                 if tick % 3 == 0:
                     due_reminders()
+                if tick % 9 == 0:
+                    from . import shop
+                    shop.check_venmo_mail()
                 if tick % 180 == 0:
                     db.prune()
                 flush()

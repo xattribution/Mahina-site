@@ -35,11 +35,39 @@
     return null;
   }
 
+  // ----- shop: orders live in memory so selling and checkout can be tried -----
+  const shopOrders = () => (D["/api/admin/shop/orders"] ||= []);
+  const VIEW = { open: (o) => o.status === "pending" || (o.status === "paid" && !o.picked_up), waiting: (o) => o.status === "pending",
+    hand_out: (o) => o.status === "paid" && !o.picked_up, all: () => true };
+  const handle_ = () => (D["/api/site"].venmo || "").replace(/^@/, "");
+  const payLink = (o) => `https://venmo.com/?txn=pay&recipients=${encodeURIComponent(handle_())}&amount=${(o.total / 100).toFixed(2)}&note=${encodeURIComponent(`${D["/api/site"].club_name} order ${o.code}`)}&audience=private`;
+  const withPay = (o) => { if (o.status === "pending") o.venmo = { handle: handle_(), link: payLink(o) }; else delete o.venmo; return o; };
+  const publicOrder = (o) => { const { id, name, email, method, note, paid_at, paid_by, picked_up_at, ...rest } = withPay(o); return { ...rest, pickup: D["/api/shop"]?.note || "" }; };
+  function newOrder(body, channel) {
+    const products = (D["/api/admin/shop"] || {}).products || [];
+    const items = (body.items || []).map((it) => {
+      const p = products.find((x) => x.id === Number(it.product_id));
+      if (!p) throw new DemoError("Something in the cart isn't for sale anymore.");
+      if (p.options.length && !p.options.includes(it.option)) throw new DemoError(`Pick a size for ${p.name}.`);
+      return { product_id: p.id, name: p.name, option: it.option || "", qty: Number(it.qty || 1), price: p.price };
+    });
+    if (!items.length) throw new DemoError("The cart is empty.");
+    const code = "MC-" + Array.from({ length: 5 }, () => "ABCDEFGHJKMNPQRSTUVWXYZ23456789"[Math.floor(Math.random() * 31)]).join("");
+    const now = new Date().toISOString().slice(0, 19);
+    const cash = body.method === "cash";
+    const o = { id: Date.now(), code, status: cash ? "paid" : "pending", total: items.reduce((s, i) => s + i.qty * i.price, 0), items, created: now,
+      paid: cash, picked_up: cash, channel, name: body.name || "", email: body.email || "", method: channel === "table" ? body.method : "", note: "",
+      paid_at: cash ? now : null, paid_by: cash ? D["/api/admin/state"].admin.name : "", picked_up_at: cash ? now : null };
+    shopOrders().unshift(withPay(o));
+    return o;
+  }
+
   async function handle(fullPath, opts = {}) {
     const method = (opts.method || "GET").toUpperCase();
     const [path, qs] = fullPath.split("?");
     const params = new URLSearchParams(qs || "");
     const body = opts.body || {};
+    let m;
 
     if (method === "GET") {
       if (path === "/api/events") {
@@ -51,12 +79,18 @@
       }
       if (path === "/api/admin/email/preview") return wait({ count: 14 });
       if (path === "/api/admin/invites") return wait(D[path] || []);
+      if (path === "/api/admin/shop/orders") return wait(shopOrders().filter(VIEW[params.get("view") || "open"] || (() => true)));
+      if ((m = path.match(/^\/api\/admin\/shop\/orders\/(\d+)$/))) return wait(shopOrders().find((o) => o.id === Number(m[1])));
+      if ((m = path.match(/^\/api\/shop\/orders\/([^/]+)$/))) {
+        const o = shopOrders().find((x) => x.code === decodeURIComponent(m[1]).toUpperCase());
+        if (!o) throw new DemoError("We couldn't find that order.", 404);
+        return wait(publicOrder(o));
+      }
       if (D[path] !== undefined) return wait(D[path]);
       throw new DemoError("That isn't part of this preview.", 404);
     }
 
     // ----- public actions -----
-    let m;
     if ((m = path.match(/^\/api\/events\/([^/]+)\/rsvp$/))) {
       who(body);
       const ev = D[`/api/events/${m[1]}`];
@@ -107,6 +141,27 @@
     if (path === "/api/contact") { who(body); if (!(body.message || "").trim()) throw new DemoError("Write a message.", 400, "message"); return wait({ ok: true }); }
     if (path === "/api/subscribe") { if (!emailOk(body.email)) throw new DemoError("Enter an email address like name@example.com.", 400, "email"); return wait({ ok: true }); }
     if (path === "/api/photos/submit") return wait({ received: opts.form ? opts.form.getAll("files").length : 0 });
+    if (path === "/api/shop/orders") { who(body); return wait(publicOrder(newOrder(body, "online"))); }
+    if (path === "/api/admin/shop/orders") return wait(newOrder(body, "table"));
+    if ((m = path.match(/^\/api\/admin\/shop\/orders\/(\d+)\/status$/))) {
+      const o = shopOrders().find((x) => x.id === Number(m[1]));
+      const now = new Date().toISOString().slice(0, 19);
+      if (body.action === "paid") Object.assign(o, { status: "paid", paid: true, method: body.method || "venmo", paid_at: now, paid_by: D["/api/admin/state"].admin.name },
+        o.channel === "table" ? { picked_up: true, picked_up_at: now } : {});
+      if (body.action === "picked_up") Object.assign(o, { picked_up: true, picked_up_at: now });
+      if (body.action === "not_picked_up") Object.assign(o, { picked_up: false, picked_up_at: null });
+      if (body.action === "cancel") Object.assign(o, { status: "cancelled" });
+      return wait(withPay(o));
+    }
+    if (path === "/api/admin/shop/check-mail") return wait({ at: new Date().toISOString().slice(0, 19), ok: false, message: "The preview can't reach a mailbox." });
+    if (path === "/api/admin/shop/settings") {
+      const s = D["/api/admin/shop"].settings;
+      if ("enabled" in body) { s.enabled = D["/api/admin/shop"].enabled = !!body.enabled; D["/api/site"].shop = body.enabled ? { title: s.title } : null; }
+      if ("title" in body) { s.title = body.title || "Shop"; if (D["/api/site"].shop) D["/api/site"].shop.title = s.title; if (D["/api/shop"]) D["/api/shop"].title = s.title; }
+      if ("note" in body) { s.note = body.note; if (D["/api/shop"]) D["/api/shop"].note = body.note; }
+      if (body.imap) s.imap = { ...body.imap, password: body.imap.password ? "••••••••" : "" };
+      return wait(s);
+    }
 
     // ----- admin -----
     if (path === "/api/admin/login" || path === "/api/admin/setup" || path === "/api/admin/logout") return wait({ ok: true });

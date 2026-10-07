@@ -37,10 +37,11 @@ for s in grab(pub, "/api/sheets"):
 for p in grab(pub, "/api/polls"):
     grab(pub, f"/api/polls/{p['slug']}")
 grab(pub, "/api/photos")
+grab(pub, "/api/shop")
 
 for path in ["/api/admin/overview", "/api/admin/events", "/api/admin/sheets", "/api/admin/polls", "/api/admin/photos",
              "/api/admin/tags", "/api/admin/messages", "/api/admin/people", "/api/admin/outbox", "/api/admin/settings",
-             "/api/admin/admins", "/api/admin/planning", "/api/admin/activity", "/api/admin/team"]:
+             "/api/admin/admins", "/api/admin/planning", "/api/admin/activity", "/api/admin/team", "/api/admin/shop"]:
     grab(adm, path)
 for e in data["/api/admin/events"]:
     grab(adm, f"/api/admin/events/{e['id']}")
@@ -50,6 +51,9 @@ for p in data["/api/admin/polls"]:
     grab(adm, f"/api/admin/polls/{p['id']}")
 for e in data["/api/admin/planning"]["events"]:
     grab(adm, f"/api/admin/planning/{e['id']}")
+if data.get("/api/admin/shop"):
+    data["/api/admin/shop/orders"] = adm.get("/api/admin/shop/orders?view=all").json()
+    data["/api/admin/shop"]["settings"]["imap_status"] = {"at": None, "ok": None, "message": ""}
 state = adm.get("/api/admin/state").json()
 state["admin"].update(email="admin@example.com")
 data["/api/admin/state"] = {**state, "sso": None}
@@ -78,7 +82,7 @@ def walk(x):
 
 walk(data)
 for f in used:
-    src = os.path.join(ROOT, "data", "uploads", f)
+    src = os.path.join(os.environ.get("MAHINA_DATA") or os.path.join(ROOT, "data"), "uploads", f)
     if os.path.exists(src):
         shutil.copy(src, os.path.join(OUT, "media", f))
 

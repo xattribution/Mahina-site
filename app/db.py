@@ -122,6 +122,19 @@ CREATE TABLE IF NOT EXISTS invites (
   invited_by INTEGER REFERENCES admins(id) ON DELETE SET NULL, invited_by_name TEXT DEFAULT '',
   created TEXT NOT NULL, expires TEXT NOT NULL, used_at TEXT);
 
+-- Shop: products and orders. Prices are whole cents. Stock is per option (size), or empty to not track it.
+CREATE TABLE IF NOT EXISTS products (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, description TEXT DEFAULT '', price INTEGER NOT NULL DEFAULT 0,
+  photo_id INTEGER REFERENCES photos(id) ON DELETE SET NULL, options TEXT DEFAULT '[]', stock TEXT DEFAULT '{}',
+  active INTEGER DEFAULT 1, sort INTEGER DEFAULT 0, created TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT DEFAULT '', email TEXT DEFAULT '',
+  items TEXT NOT NULL, total INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+  method TEXT DEFAULT '', channel TEXT DEFAULT 'online', note TEXT DEFAULT '',
+  created TEXT NOT NULL, paid_at TEXT, paid_by TEXT DEFAULT '', picked_up_at TEXT);
+CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+
 -- Who did what in the admin console.
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY, at TEXT NOT NULL, actor_id INTEGER, actor TEXT NOT NULL,
@@ -156,6 +169,10 @@ DEFAULT_SETTINGS = {
     "disclaimer": "The Mahina Club is a private organization. It is not a part of the Department of Defense or any of its components and has no governmental status.",
     "smtp": {"host": "", "port": 587, "user": "", "password": "", "from": "", "security": "starttls"},
     "site_url": "",
+    "shop_enabled": False,
+    "shop_title": "Shop",
+    "shop_note": "",
+    "shop_imap": {"host": "", "user": "", "password": "", "folder": "INBOX"},
 }
 
 
@@ -284,6 +301,9 @@ def prune():
     c.execute("DELETE FROM outbox WHERE status='sent' AND created < ?", ((now - timedelta(days=90)).isoformat(),))
     c.execute("DELETE FROM audit_log WHERE at < ?", ((now - timedelta(days=400)).isoformat(),))
     c.execute("DELETE FROM invites WHERE expires < ?", ((now - timedelta(days=30)).isoformat(),))
+    # Online orders nobody paid for in two weeks are cancelled, and their items go back on the shelf.
+    from . import shop
+    shop.expire_stale(c, (now - timedelta(days=14)).isoformat())
     c.commit()
 
 

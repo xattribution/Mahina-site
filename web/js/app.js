@@ -2,10 +2,13 @@ import { h, $, $$, api, clear, go, href, icon, link, loading, onRender, route, f
 import { moonInfo, moonSVG } from "./moon.js";
 import * as P from "./pages.js";
 import * as E from "./events.js";
+import * as S from "./shop.js";
 import { EDIT, ed, tool, saveSettings, initEditing, ask } from "./edit.js";
 
 // Sign-ups live on each event's page, so there's no separate Sign up page in the menu.
-const NAV = [["/events", "Events"], ["/gallery", "Gallery"], ["/polls", "Polls"], ["/contact", "Contact"]];
+const BASE_NAV = [["/events", "Events"], ["/gallery", "Gallery"], ["/polls", "Polls"], ["/contact", "Contact"]];
+// The shop shows up in the menu only once an admin turns it on.
+const nav = () => window.SITE?.shop ? [...BASE_NAV.slice(0, 3), ["/shop", window.SITE.shop.title || "Shop"], ...BASE_NAV.slice(3)] : BASE_NAV;
 
 export const PALETTES = {
   classic: { name: "Red, white & blue", night: "#0F2340", accent: "#C8233B" },
@@ -38,7 +41,7 @@ function wordmark(onNight = false) {
 function drawer() {
   const d = h("div.drawer", { role: "dialog", "aria-modal": "true", "aria-label": "Menu" },
     h("div.drawer-top", wordmark(true), h("button.icon-btn", { "aria-label": "Close menu", onclick: () => d.remove() }, icon("close", 24))),
-    h("nav", [["/", "Home"], ...NAV, ["/give", "Give"]].map(([p, t]) => link(p, { onclick: () => d.remove(), "aria-current": currentPath() === p ? "page" : null }, t))));
+    h("nav", [["/", "Home"], ...nav(), ["/give", "Give"]].map(([p, t]) => link(p, { onclick: () => d.remove(), "aria-current": currentPath() === p ? "page" : null }, t))));
   document.body.append(d);
   d.querySelector("nav a").focus();
   d.addEventListener("keydown", (e) => e.key === "Escape" && d.remove());
@@ -73,7 +76,7 @@ function header() {
     banner(),
     h("header.site-header", h("div.wrap",
       wordmark(),
-      h("nav.nav", { "aria-label": "Main" }, NAV.map(([p, t]) => link(p, { "data-nav": p }, t)), link("/give", { class: "btn" }, "Give")),
+      h("nav.nav", { "aria-label": "Main" }, nav().map(([p, t]) => link(p, { "data-nav": p }, t)), link("/give", { class: "btn" }, "Give")),
       h("button.icon-btn.menu-btn", { "aria-label": "Open menu", onclick: drawer }, icon("menu", 24)))),
   ];
 }
@@ -94,7 +97,7 @@ function footer() {
     h("div.foot-grid",
       h("div", wordmark(true), S.org_line || EDIT.on ? ed(h("p.foot-org", S.org_line || ""), { placeholder: "Organization", label: "Organization",
         save: (t) => saveSettings({ org_line: t }) }) : null),
-      h("div.foot-links", [...NAV, ["/give", "Give"]].map(([p, t]) => link(p, {}, t)),
+      h("div.foot-links", [...nav(), ["/give", "Give"]].map(([p, t]) => link(p, {}, t)),
         h("a", { href: feed }, "Calendar feed"), S.email ? h("a", { href: `mailto:${S.email}` }, "Email us") : null),
       h("div.foot-sub", h("h3", "Get club news"), sub)),
     h("div.foot-legal", ed(h("p", S.disclaimer || ""), { multiline: true, placeholder: "Footer notice", label: "Footer notice",
@@ -166,6 +169,8 @@ route("/polls", P.polls);
 route("/polls/:slug", P.pollPage);
 route("/give", P.give);
 route("/contact", P.contact);
+route("/shop", S.shopPage);
+route("/shop/order/:code", S.orderPage);
 route("/me/:token", P.mine);
 // One sign-in for everyone at /login. The dashboard at /team shows each person only what their account allows.
 route("/login", () => null);

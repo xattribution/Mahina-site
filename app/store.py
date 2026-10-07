@@ -433,6 +433,7 @@ def forget(email):
         out["poll_answers"] = run("UPDATE responses SET name='', email='' WHERE lower(email)=?")
         out["photos"] = run("UPDATE photos SET submitted_by='' WHERE instr(lower(submitted_by), ?) > 0")
         out["emails"] = run("DELETE FROM outbox WHERE lower(to_email)=?")
+        out["orders"] = run("UPDATE orders SET name='', email='' WHERE lower(email)=?")  # sales totals stay, the person doesn't
         run("DELETE FROM reminders_sent WHERE lower(email)=?")
     return out
 

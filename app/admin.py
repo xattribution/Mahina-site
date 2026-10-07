@@ -48,6 +48,7 @@ PERMS = {
     "messages": "Messages",
     "people": "People",
     "email": "Email",
+    "shop": "Shop",
 }
 DEFAULT_MEMBER_PERMS = ["planning"]
 
@@ -231,6 +232,9 @@ def overview(a=Signed):
         out["outbox_held"] = db.one("SELECT COUNT(*) n FROM outbox WHERE status IN ('held','failed')")["n"]
     if allowed(a, "polls"):
         out["open_polls"] = db.one("SELECT COUNT(*) n FROM polls WHERE status='open'")["n"]
+    if allowed(a, "shop"):
+        out["shop_waiting"] = db.one("SELECT COUNT(*) n FROM orders WHERE status='pending'")["n"]
+        out["shop_hand_out"] = db.one("SELECT COUNT(*) n FROM orders WHERE status='paid' AND picked_up_at IS NULL")["n"]
     if a["role"] == "admin":
         out["smtp_ready"] = mailer.smtp_config()["ready"]
         out["venmo"] = bool(db.get_setting("venmo"))
@@ -1128,8 +1132,8 @@ def settings_update(body: dict = Body(...), a=AdminOnly):
 
 
 @router.post("/settings/cover")
-async def upload_single(file: UploadFile = File(...), a=can("events", "photos")):
-    """Upload one image for an event cover without putting it in the gallery."""
+async def upload_single(file: UploadFile = File(...), a=can("events", "photos", "signups", "shop")):
+    """Upload one image (event cover, sign-up slot, product) without putting it in the gallery."""
     try:
         fn, th, w, h = media.save_image(await file.read())
     except ValueError as e:

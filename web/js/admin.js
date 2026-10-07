@@ -4,6 +4,7 @@ import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRang
   setTitle, media, loading, CFG, query, replaceUrl, anchor, linkPicker } from "./core.js";
 import { moonInfo, moonSVG } from "./moon.js";
 import { results } from "./pages.js";
+import { shopAdmin } from "./shop-team.js";
 
 let ME = null;
 let STATE = {};
@@ -52,7 +53,7 @@ export async function render(path) {
   clear(app).append(layout(section, main));
   window.scrollTo(0, 0);
   const pages = { "": overview, planning: id ? planPage : planningList, events: id ? eventEditor : eventsList, signups: id ? sheetEditorPage : sheetsList,
-    polls: id ? pollEditor : pollsList, gallery: galleryAdmin, messages: inbox, people, email: emailPage, accounts, activity, settings, account };
+    polls: id ? pollEditor : pollsList, gallery: galleryAdmin, messages: inbox, people, email: emailPage, shop: shopAdmin, accounts, activity, settings, account };
   const navItem = NAV.find((n) => n[0] === section);
   try {
     if (navItem && !navAllowed(navItem)) throw new Error("You don't have access to this part. Ask an admin.");
@@ -67,7 +68,7 @@ export async function render(path) {
 async function refreshCounts() {
   try {
     const o = await api("/api/admin/overview");
-    COUNTS = { messages: o.unread, gallery: o.pending_photos, email: o.outbox_held, planning: o.my_tasks };
+    COUNTS = { messages: o.unread, gallery: o.pending_photos, email: o.outbox_held, planning: o.my_tasks, shop: (o.shop_waiting || 0) + (o.shop_hand_out || 0) };
     $$(".side nav a").forEach((a) => {
       const n = COUNTS[a.dataset.sec];
       $(".count", a)?.remove();
@@ -80,6 +81,7 @@ async function refreshCounts() {
 const NAV = [["", "Overview", "home", null], ["planning", "Planning", "clipboard", ["planning", "events"]], ["events", "Events", "calendar", ["events"]],
   ["signups", "Sign-ups", "list", ["signups", "events"]], ["polls", "Polls", "poll", ["polls"]], ["gallery", "Gallery", "image", ["photos"]],
   ["messages", "Messages", "inbox", ["messages"]], ["people", "People", "people", ["people"]], ["email", "Email", "mail", ["email"]],
+  ["shop", "Shop", "bag", ["shop"]],
   ["accounts", "Accounts", "shield", "admin"], ["activity", "Activity", "history", "admin"], ["settings", "Settings", "gear", "admin"]];
 const navAllowed = ([, , , who]) => !who || (who === "admin" ? isAdmin() : can(...who));
 
@@ -1303,6 +1305,7 @@ const PERM_HELP = {
   messages: "Read the Contact inbox.",
   people: "See the mailing list. Add and delete people.",
   email: "Email the mailing list and event attendees.",
+  shop: "Sell at the table, see orders, and edit products.",
 };
 
 function accountForm(acct, perms, defaults, onDone) {
@@ -1454,3 +1457,6 @@ async function account() {
     pwOn ? h("section.settings-sec", h("div", h("h2", "Password")), pw)
       : h("section.settings-sec", h("div", h("h2", "Password")), h("p.muted", `You sign in with ${STATE.sso?.name || "single sign-on"}.`)));
 }
+
+// Shared with the dashboard shop (shop-team.js).
+export { head, sw, pill, ago, dateCell, isAdmin, csv, pickSlotImage, refreshSite, aLink };
