@@ -649,7 +649,9 @@ def signup_delete(uid: int, a=can("signups", "events")):
 
 @router.post("/slots/{slot_id}/signup")
 def signup_add(slot_id: int, body: dict = Body(...), a=can("signups", "events")):
-    out = store.signup(slot_id, body)
+    member_mail_budget(a)
+    # Signing someone up by hand never adds them to the club news list; that's their choice to make.
+    out = store.signup(slot_id, {**body, "news": False})
     audit(a, "Signed someone up", f"{store.need_name(body.get('name'))}, {title_of('slots', slot_id)}")
     return out
 
@@ -913,6 +915,12 @@ def people(a=can("people")):
 
 @router.post("/people")
 def people_add(body: dict = Body(...), a=can("people")):
+    lines = [x for x in (body.get("emails") or "").replace(",", "\n").splitlines() if x.strip()]
+    if a["role"] != "admin":
+        # Everyone added gets a welcome email, so members add up to 100 at a time, within their hourly email budget.
+        if len(lines) > 100:
+            raise Invalid("Add up to 100 people at a time. Ask an admin for a bigger import.", "emails")
+        member_mail_budget(a, len(lines))
     added = 0
     for line in (body.get("emails") or "").replace(",", "\n").splitlines():
         line = line.strip()
@@ -935,6 +943,10 @@ def people_add(body: dict = Body(...), a=can("people")):
 def people_update(body: dict = Body(...), a=can("people")):
     email = store.need_email(body.get("email"))
     if body.get("active"):
+        r = db.one("SELECT active FROM subscribers WHERE email=?", (email,))
+        if r and not r["active"] and a["role"] != "admin":
+            raise Invalid("They unsubscribed. Only an admin can put them back on the list.", status=403)
+        member_mail_budget(a)
         store.subscribe(email, body.get("name", ""), "admin")
     else:
         db.run("UPDATE subscribers SET active=0 WHERE email=?", (email,))
@@ -968,7 +980,10 @@ def audience(spec):
         for email, p in attendee_emails(int(spec.get("event_id") or 0)).items():
             out[email] = {"name": p["name"], "manage": p["token"]}
     if kind == "custom":
-        for line in (spec.get("emails") or "").replace(",", "\n").splitlines():
+        raw = spec.get("emails") or ""
+        if isinstance(raw, list):
+            raw = "\n".join(str(x) for x in raw)
+        for line in str(raw).replace(",", "\n").splitlines():
             if store.EMAIL_RE.match(line.strip()):
                 out[line.strip().lower()] = {"name": ""}
     for email in list(out):
@@ -985,6 +1000,11 @@ def email_preview(body: dict = Body(...), a=can("email")):
 
 @router.post("/email/send")
 def email_send(body: dict = Body(...), a=can("email")):
+    from .main import hit
+    hit(("email-send", a["id"]), 10 if a["role"] == "admin" else 5, 3600, "That's a lot of sends for one hour. Try again later.")
+    aud = body.get("audience") or {}
+    if a["role"] != "admin" and aud.get("type") == "custom" and len(re.findall(r"@", str(aud.get("emails") or ""))) > 100:
+        raise Invalid("Members can email up to 100 specific addresses at a time. Ask an admin for bigger sends.", "emails")
     subject = clean(body.get("subject"), 160)
     text = clean(body.get("body"), 10000, multiline=True)
     if not subject:
@@ -994,6 +1014,8 @@ def email_send(body: dict = Body(...), a=can("email")):
     people = audience(body.get("audience") or {})
     if not people:
         raise Invalid("No one is in that audience yet.")
+    if aud.get("type") == "custom":
+        member_mail_budget(a, len(people))
     ev = db.one("SELECT * FROM events WHERE id=?", (body.get("event_id"),)) if body.get("event_id") else None
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
     for email, p in people.items():
@@ -1180,7 +1202,7 @@ def settings_update(body: dict = Body(...), a=AdminOnly):
     if venmo_changed or smtp_changed:
         # Where money goes, and the email server that carries confirmation codes, need a fresh confirmation first.
         # Before email is set up, that's the admin's password.
-        stepup.require(a, "the club Venmo handle" if venmo_changed else "the email server")
+        stepup.require(a, " and ".join(x for x, on in (("the club Venmo handle", venmo_changed), ("the email server", smtp_changed)) if on))
     for k in PUBLIC_KEYS:
         if k in body:
             db.set_setting(k, body[k])
@@ -1260,6 +1282,18 @@ def admin_count():
     return db.one("SELECT COUNT(*) n FROM admins WHERE role='admin'")["n"]
 
 
+def member_mail_budget(a, n=1):
+    """Emails a member causes to go to people outside the team (welcomes, sign-up confirmations, invites) share one
+    budget: 100 an hour and 300 a day. Admins aren't limited here. Emailing the existing list is the Email permission
+    itself and isn't counted."""
+    if a["role"] == "admin" or n <= 0:
+        return
+    from .main import spend
+    msg = "That's a lot of emails to new addresses for now. Try again later, or ask an admin."
+    spend(("member-mail-h", a["id"]), n, 100, 3600, msg)
+    spend(("member-mail-d", a["id"]), n, 300, 86400, msg)
+
+
 def member_may_grant(a, role, perms):
     """Members with Team access invite members only, and only with access they have themselves."""
     if a["role"] == "admin":
@@ -1275,7 +1309,11 @@ def member_may_grant(a, role, perms):
 def admins(a=can("team")):
     rows = db.q("SELECT * FROM admins ORDER BY role='member', name COLLATE NOCASE")
     grantable = sorted(PERMS) if a["role"] == "admin" else sorted(p for p in a["perms"] if p in PERMS)
-    return {"accounts": [account_out(r) for r in rows], "perms": PERMS, "grantable": grantable,
+    accts = [account_out(r) for r in rows]
+    if a["role"] != "admin":
+        # Members see who's on the team and what they can do, not their email addresses or sign-in times.
+        accts = [{**x, "email": mask_email(x["email"]) if x["id"] != a["id"] else x["email"], "last_login": None} for x in accts]
+    return {"accounts": accts, "perms": PERMS, "grantable": grantable,
             "default_member_perms": [p for p in DEFAULT_MEMBER_PERMS if p in grantable]}
 
 
@@ -1407,7 +1445,13 @@ def send_invite(a, inv_id, email, name, role):
 
 @router.get("/invites")
 def invites(a=can("team")):
-    return [invite_out(r) for r in db.q("SELECT * FROM invites WHERE used_at IS NULL ORDER BY created DESC")]
+    out = [invite_out(r) for r in db.q("SELECT * FROM invites WHERE used_at IS NULL ORDER BY created DESC")]
+    if a["role"] != "admin":
+        # Members see full addresses only on invites they could have sent themselves.
+        for i in out:
+            if i["role"] == "admin" or not set(i["perms"]) <= set(a["perms"]):
+                i["email"] = mask_email(i["email"])
+    return out
 
 
 @router.post("/invites")
@@ -1420,6 +1464,7 @@ def invite_create(body: dict = Body(...), a=can("team")):
     perms = clean_perms(body.get("perms") if "perms" in body else DEFAULT_MEMBER_PERMS) if role == "member" else []
     member_may_grant(a, role, perms)
     stepup.require(a, "team accounts")
+    member_mail_budget(a)
     db.run("DELETE FROM invites WHERE email=? AND used_at IS NULL", (email,))  # one open invite per person
     iid = db.run("INSERT INTO invites(token, email, name, role, perms, invited_by, invited_by_name, created, expires) "
                  "VALUES (?,?,?,?,?,?,?,?,?)", (secrets.token_hex(16), email, name, role, json.dumps(perms), a["id"], a["name"],
@@ -1440,6 +1485,7 @@ def invite_resend(iid: int, a=can("team")):
         raise Invalid("That invite was already used or removed.", status=404)
     member_may_grant(a, r["role"], clean_perms(json.loads(r["perms"] or "[]")))
     stepup.require(a, "team accounts")
+    member_mail_budget(a)
     link, expires = send_invite(a, iid, r["email"], r["name"], r["role"])
     audit(a, "Resent an invite", r["name"] or mask_email(r["email"]))
     ready = mailer.smtp_config()["ready"]
@@ -1449,8 +1495,11 @@ def invite_resend(iid: int, a=can("team")):
 @router.delete("/invites/{iid}")
 def invite_revoke(iid: int, a=can("team")):
     r = db.one("SELECT * FROM invites WHERE id=? AND used_at IS NULL", (iid,))
-    if r and a["role"] != "admin" and r["role"] == "admin":
-        raise Invalid("Only an admin can cancel an admin invite.", status=403)
+    if r:
+        try:
+            member_may_grant(a, r["role"], clean_perms(json.loads(r["perms"] or "[]")))
+        except Invalid:
+            raise Invalid("Only an admin can cancel that invite.", status=403)
     if r:
         db.run("DELETE FROM invites WHERE id=?", (iid,))
         audit(a, "Cancelled an invite", r["name"] or mask_email(r["email"]))

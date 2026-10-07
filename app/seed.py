@@ -305,9 +305,9 @@ def run():
         pids[name] = db.run("INSERT INTO products(name, description, price, photo_id, options, stock, sort, created) VALUES (?,?,?,?,?,?,?,?)",
                             (name, desc, price, photo(img, status="cover"), json.dumps(opts), json.dumps(stock), i, at(-20)))
     for code, name, items, total, status, method, channel, when, picked in [
-        ("MC-7Q4K2", "Maria Santos", [("Club T-shirt", "M", 2, 2000)], 4000, "paid", "venmo", "online", at(-3, 19), None),
-        ("MC-H8RWD", "Derek Nguyen", [("Morale patch", "", 1, 800), ("Coffee mug", "", 1, 1500)], 2300, "pending", "", "online", at(-1, 8), None),
-        ("MC-3ZX9P", "", [("Morale patch", "", 3, 800)], 2400, "paid", "cash", "table", at(-6, 17), at(-6, 17)),
+        ("MC-7Q4K2P", "Maria Santos", [("Club T-shirt", "M", 2, 2000)], 4000, "paid", "venmo", "online", at(-3, 19), None),
+        ("MC-H8RWDN", "Derek Nguyen", [("Morale patch", "", 1, 800), ("Coffee mug", "", 1, 1500)], 2300, "pending", "", "online", at(-1, 8), None),
+        ("MC-3ZX9PA", "", [("Morale patch", "", 3, 800)], 2400, "paid", "cash", "table", at(-6, 17), at(-6, 17)),
     ]:
         lines = [{"product_id": pids[n], "name": n, "option": o, "qty": q, "price": p} for n, o, q, p in items]
         db.run("INSERT INTO orders(code, name, email, items, total, status, method, channel, created, paid_at, paid_by, picked_up_at) "

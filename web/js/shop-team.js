@@ -150,7 +150,7 @@ function sendDialog(o, people, onSent) {
   const form = h("form",
     h("div.field", h("span.field-label", "Send to"),
       people.length ? h("div.send-to", people.map((p) => h("label.check", h("input", { type: "checkbox", name: "to", value: p.id }), p.name)))
-        : h("p.muted", "No one else can see the shop yet. Give someone the Shop permission under Accounts."),
+        : h("p.muted", "No one else can see the shop yet. Give someone the Shop permission under Team."),
       h("span.field-error")),
     field("Note", h("textarea", { name: "note", rows: 3, maxlength: 1000, placeholder: "Can you bring this to Saturday's meeting?" }), { optional: true }),
     h("p.form-error"),

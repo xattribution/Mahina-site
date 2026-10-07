@@ -1494,7 +1494,7 @@ async function accounts() {
         h("td", pill(i.role === "admin" ? "published" : "draft", i.role === "admin" ? "Admin" : "Member")),
         h("td.sub", `${i.invited_by}, ${ago(i.created)}`),
         h("td.sub", i.expired ? pill("closed", "Expired") : `Works until ${dateCell(i.expires)}`),
-        h("td.actions", !isAdmin() && i.role === "admin" ? null : h("div.row", { style: { gap: "4px", flexWrap: "nowrap", justifyContent: "flex-end" } },
+        h("td.actions", !isAdmin() && (i.role === "admin" || i.perms.some((p) => !ME.perms.includes(p))) ? null : h("div.row", { style: { gap: "4px", flexWrap: "nowrap", justifyContent: "flex-end" } },
           h("button.btn.small.ghost", { type: "button", onclick: async () => {
             const r = await api(`/api/admin/invites/${i.id}/resend`, { method: "POST" });
             if (r.emailed) toast(`New link sent to ${i.email}`); else showInviteLink({ link: r.link, email: i.email, expires: r.expires });

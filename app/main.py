@@ -25,6 +25,7 @@ WEB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "web")
 app = FastAPI(title="Mahina Club", docs_url=None, redoc_url=None, openapi_url=None)
 db.init()
 
+UPLOAD_PERMS = {"/api/admin/photos": ("photos",), "/api/admin/settings/cover": ("events", "photos", "signups", "shop")}
 # Big bodies are allowed only for these exact upload routes, and only as multipart POSTs. Everything else gets 1 MB.
 UPLOAD_LIMITS = {"/api/photos/submit": 100 * 1024 * 1024, "/api/admin/photos": 200 * 1024 * 1024,
                  "/api/admin/settings/cover": 30 * 1024 * 1024}
@@ -50,11 +51,15 @@ class Guard:
             # Turn people away before reading a single byte of their upload.
             return await self._send_json(send, 403, b'{"error":"Photo sharing is turned off."}')
         if multipart and path.startswith("/api/admin/"):
-            # Dashboard uploads need a signed-in session before the body is read.
+            # Dashboard uploads need a signed-in session with the right access before the body is read.
             cookies = headers.get(b"cookie", b"").decode("latin-1")
             m = re.search(r"(?:^|;\s*)mc_session=([^;]+)", cookies)
-            if not (m and _auth.session_admin(m.group(1))):
+            u = _auth.session_admin(m.group(1)) if m else None
+            if not u:
                 return await self._send_json(send, 401, b'{"error":"Sign in to continue."}')
+            need = UPLOAD_PERMS.get(path, ())
+            if u["role"] != "admin" and not (set(need) & u["perms"]):
+                return await self._send_json(send, 403, b'{"error":"You don\'t have access to that. Ask an admin."}')
         https = scope.get("scheme") == "https" or headers.get(b"x-forwarded-proto") == b"https"
         try:
             if int(headers.get(b"content-length", b"0")) > limit:
@@ -166,6 +171,18 @@ def hit(key, limit, window, message="Too many tries. Wait a few minutes and try 
         if len(dq) >= limit:
             raise Invalid(message, status=429)
         dq.append(now)
+
+
+def spend(key, n, limit, window, message):
+    """Like hit(), but uses up n at once (for a batch of emails)."""
+    now = time.time()
+    with _hits_lock:
+        dq = _hits[key]
+        while dq and dq[0] < now - window:
+            dq.popleft()
+        if len(dq) + n > limit:
+            raise Invalid(message, status=429)
+        dq.extend([now] * n)
 
 
 def throttle(request: Request, bucket: str, limit=12, window=300):

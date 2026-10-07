@@ -36,8 +36,12 @@ def passed(user):
 
 def require(user, what="a protected setting"):
     if not passed(user):
-        # Remember what this session was trying to do, so the code email can name it.
-        db.run("UPDATE sessions SET stepup_for=? WHERE token=?", (what, user.get("token")))
+        # Remember everything this session is waiting to do, so the code email and the popup name all of it.
+        r = db.one("SELECT stepup_for FROM sessions WHERE token=?", (user.get("token"),)) or {}
+        items = [x for x in (r.get("stepup_for") or "").split("|") if x]
+        if what not in items:
+            items.append(what)
+        db.run("UPDATE sessions SET stepup_for=? WHERE token=?", ("|".join(items[-5:]), user.get("token")))
         raise Invalid("Confirm it's you to change this.", field="stepup", status=428)
 
 
@@ -62,7 +66,8 @@ def start(user, resend=False):
     live = db.one("SELECT * FROM step_checks WHERE session=? AND expires > ? AND tries < ?",
                   (user["token"], datetime.utcnow().isoformat(), MAX_TRIES))
     from .admin import mask_email
-    what = (db.one("SELECT stepup_for FROM sessions WHERE token=?", (user["token"],)) or {}).get("stepup_for") or "a protected setting"
+    items = [x for x in ((db.one("SELECT stepup_for FROM sessions WHERE token=?", (user["token"],)) or {}).get("stepup_for") or "").split("|") if x]
+    what = " and ".join([", ".join(items[:-1]), items[-1]] if len(items) > 1 else items) or "a protected setting"
     if live and not resend:
         return {"method": live["method"], "to": mask_email(user["email"]), "what": what}
     if not mailer.smtp_config()["ready"]:

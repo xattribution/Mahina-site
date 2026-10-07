@@ -7,6 +7,7 @@ note, so a payment can be matched to its order by eye or automatically. The auto
 import email
 import email.header
 import imaplib
+import ipaddress
 import json
 import re
 import hashlib
@@ -30,7 +31,7 @@ public = APIRouter(prefix="/api/shop")
 team = APIRouter(prefix="/api/admin/shop")
 
 CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no I, L, O, 0, 1: easy to read aloud and retype
-CODE_RE = re.compile(r"\bMC-([A-HJKMNP-Z2-9]{5,6})\b", re.I)  # the dash is required, so names like McCarthy never look like codes
+CODE_RE = re.compile(r"\bMC-([A-HJKMNP-Z2-9]{6})\b", re.I)  # the dash is required, so names like McCarthy never look like codes
 AMOUNT_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\b")
 # The paid amount is read only from Venmo's own subject line ("Lani Kai paid you $20.00"), never from the body,
 # because the body carries the payer's note and the payer writes that.
@@ -154,7 +155,11 @@ def reserve(c, items, active_only=True, online=False):
             pid, qty = int(it.get("product_id")), int(it.get("qty") or 1)
         except (TypeError, ValueError):
             raise Invalid("Something in the cart isn't right. Refresh and try again.")
-        key = (pid, clean(it.get("option"), 24))
+        opt = clean(it.get("option"), 24)
+        p = c.execute("SELECT options FROM products WHERE id=?", (pid,)).fetchone()
+        if p and not _json(p["options"], []):
+            opt = ""  # no sizes: every line is the same item, whatever the request says
+        key = (pid, opt)
         want[key] = want.get(key, 0) + max(0, min(qty, 50))
     want = {k: q for k, q in want.items() if q > 0}
     if not want:
@@ -193,6 +198,7 @@ def reserve(c, items, active_only=True, online=False):
                 cap = max(1, (stock[opt] + h) // 2)
                 if h + qty > cap:
                     raise Invalid(f"{label} is in high demand. Try fewer, or buy one at the next event.")
+                held[(pid, opt)] = h + qty
             stock[opt] -= qty
             c.execute("UPDATE products SET stock=? WHERE id=?", (json.dumps(stock), pid))
             cache[pid] = c.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
@@ -247,13 +253,20 @@ def create_order(body, channel, by=None, ip=None):
     c = _begin()
     try:
         nk = network_key(ip) if online else ""
-        net_cap = ONLINE_OPEN_PER_NETWORK if ":" in (ip or "") else ONLINE_OPEN_PER_IPV4
+        try:
+            a_ = ipaddress.ip_address(ip or "")
+            v6 = a_.version == 6 and not a_.ipv4_mapped
+        except ValueError:
+            v6 = False
+        net_cap = ONLINE_OPEN_PER_NETWORK if v6 else ONLINE_OPEN_PER_IPV4
         if online and (c.execute("SELECT COUNT(*) FROM orders WHERE status='pending' AND channel='online' AND lower(email)=?",
                                  (em,)).fetchone()[0] >= ONLINE_OPEN_PER_EMAIL or
                        c.execute("SELECT COUNT(*) FROM orders WHERE status='pending' AND channel='online' AND ip_key=?",
                                  (nk,)).fetchone()[0] >= net_cap):
             raise Invalid("You have orders waiting for payment. Pay for those first, or contact us.")
         lines, total = reserve(c, body.get("items"), online=online)
+        if online and total == 0:
+            raise Invalid("Free items are handed out at events, not ordered online.")
         code = new_code(c)
         paid = total == 0 or (not online and method == "cash")
         now = db.now_iso()
@@ -380,16 +393,18 @@ def mark_paid(o, method, by_name):
     return o
 
 
-def cancel(oid, note="", allow_paid=False, expired=False):
+def cancel(oid, note="", allow_paid=False, expired=False, reason=""):
     """Cancel under the write lock, so two cancels (or a cancel and an expiry) can't put stock back twice."""
     c = _begin()
     try:
         o = _row(c, oid)
-        if not o or o["status"] == "cancelled":
+        if not o or o["status"] == "cancelled" or (expired and o["status"] != "pending"):
             c.commit()
-            return o, False
+            return o, False  # already settled (an expiry never touches an order someone just paid)
         if o["status"] == "paid" and not allow_paid:
             raise Invalid("Only an admin can cancel an order that's already paid.", status=403)
+        if o["status"] == "paid" and not reason:
+            raise Invalid("It was just paid. Say why it's being cancelled, like \"refunded\".", "reason")
         cur = c.execute("UPDATE orders SET status='cancelled', expired=?, note=TRIM(note || ' ' || ?) WHERE id=? AND status=?",
                         (1 if expired else 0, note, oid, o["status"]))
         done = cur.rowcount == 1
@@ -419,7 +434,7 @@ def change(o, action, user, method="", reason=""):
         if o["status"] == "paid" and not clean(reason, 200):
             raise Invalid("Say why it's being cancelled, like \"refunded\".", "reason")
         before, done = cancel(o["id"], f"Cancelled by {user['name']}" + (f": {clean(reason, 200)}" if clean(reason, 200) else "."),
-                              allow_paid=user["role"] == "admin")
+                              allow_paid=user["role"] == "admin", reason=clean(reason, 200))
         if done and before["channel"] == "online" and before["status"] == "pending":
             order_email(before, "cancelled")
     else:
@@ -502,16 +517,53 @@ def _strip_comments(s):
     return s
 
 
-def auth_results_ok(header, authserv=""):
-    """True when the receiving mail server says both DKIM and DMARC passed for venmo.com.
-    Parsed clause by clause with comments removed, so "dkim=fail (dkim=pass header.d=venmo.com)" or
-    "header.d=venmo.com.evil.com" don't count."""
-    parts = [p.strip() for p in _strip_comments(header or "").split(";")]
+def _ar_split(s):
+    """Split an Authentication-Results header into clauses in one pass. Comments (even nested, even with quotes or
+    escaped parens inside) are dropped. A quoted string stays one token, with its separators neutralized, so text a
+    sender controls (like an envelope address) can never become a clause or a key of its own."""
+    out, depth, quote, i = [], 0, False, 0
+    while i < len(s):
+        ch = s[i]
+        if ch == "\\" and (quote or depth):
+            if quote:
+                nxt = s[i + 1:i + 2]
+                out.append("\x00" if nxt in (";", "(", ")") or nxt.isspace() else nxt)
+            i += 2
+            continue
+        if quote:
+            if ch == '"':
+                quote = False
+                if not depth:
+                    out.append(ch)
+            elif not depth:
+                out.append("\x00" if ch in ";()" or ch.isspace() else ch)
+        elif ch == '"':
+            quote = True
+            if not depth:
+                out.append(ch)
+        elif ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+            if not depth:
+                out.append(" ")
+        elif not depth:
+            out.append(ch)
+        i += 1
+    return "".join(out).split(";")
+
+
+def venmo_auth(header, authserv=""):
+    """The receiving mail server's verdict on a message from venmo.com. Returns the passing DKIM signatures' short ids
+    (header.b, often empty) when DKIM and DMARC both passed for venmo.com and nothing about venmo.com failed; else None.
+    Comments and quoted strings are removed before splitting, so neither can smuggle in a fake "pass"."""
+    parts = [p.strip() for p in _ar_split(header or "")]
     if not parts or not parts[0]:
-        return False
+        return None
     if authserv and parts[0].split()[0].lower() != authserv.lower():
-        return False
-    dkim = dmarc = False
+        return None
+    dkim = dmarc = bad = False
+    passing = []
     for clause in parts[1:]:
         toks = clause.split()
         if not toks:
@@ -520,14 +572,26 @@ def auth_results_ok(header, authserv=""):
         for t in toks[1:]:
             k, eq, v = t.partition("=")
             if eq:
-                kv[k.lower()] = v.strip('"').lower()
-        result = toks[0].lower()
-        if result == "dkim=pass":
+                kv[k.lower()] = v[1:-1] if len(v) > 1 and v[0] == v[-1] == '"' else v
+        method, _, result = toks[0].lower().partition("=")
+        if method == "dkim":
             d = kv.get("header.d") or kv.get("header.i", "").rpartition("@")[2]
-            dkim = dkim or _venmo_domain(d)
-        elif result == "dmarc=pass":
-            dmarc = dmarc or _venmo_domain(kv.get("header.from"))
-    return dkim and dmarc
+            if _venmo_domain(d):
+                if result == "pass":
+                    dkim = True
+                    passing.append(kv.get("header.b", ""))
+                else:
+                    bad = True
+        elif method == "dmarc" and _venmo_domain(kv.get("header.from")):
+            if result == "pass" and not dmarc:
+                dmarc = True
+            else:
+                bad = True  # a failure, or more than one DMARC verdict, means the header can't be trusted
+    return passing if dkim and dmarc and not bad else None
+
+
+def auth_results_ok(header, authserv=""):
+    return venmo_auth(header, authserv) is not None
 
 
 def trusted_authserv():
@@ -543,8 +607,12 @@ def from_venmo(msg):
     addr = parseaddr(msg.get("From", ""))[1].lower()
     if not addr.endswith("@venmo.com") and not re.search(r"@[\w-]+(\.[\w-]+)*\.venmo\.com$", addr):
         return False
+    return _msg_auth(msg) is not None
+
+
+def _msg_auth(msg):
     results = msg.get_all("Authentication-Results") or []
-    return bool(results) and auth_results_ok(str(results[0]), trusted_authserv())
+    return venmo_auth(str(results[0]), trusted_authserv()) if results else None
 
 
 def _subject(msg):
@@ -653,11 +721,13 @@ def sent_to_club(msg):
     to = [a.lower() for _, a in getaddresses(msg.get_all("To") or [])]
     if to != [want]:
         return False
-    for sig in msg.get_all("DKIM-Signature") or []:
-        t = _dkim_tags(str(sig))
-        if _venmo_domain(t.get("d")) and "to" in [h.strip().lower() for h in t.get("h", "").split(":")]:
-            return True
-    return False
+    # The signature that passed must be one that covers To. The server names it by the start of its b= value when it
+    # can; otherwise every venmo.com signature has to cover To.
+    sigs = [t for t in (_dkim_tags(str(sig)) for sig in msg.get_all("DKIM-Signature") or []) if _venmo_domain(t.get("d"))]
+    ids = [b for b in (_msg_auth(msg) or []) if b]
+    if ids:
+        sigs = [t for t in sigs if any(t.get("b", "").startswith(b) for b in ids)]
+    return bool(sigs) and all("to" in [h.strip().lower() for h in t.get("h", "").split(":")] for t in sigs)
 
 
 _scan_lock = threading.Lock()
@@ -708,7 +778,7 @@ def _check_venmo_mail(force):
                         continue
                     um = re.search(rb"UID (\d+)", part[0])
                     hdr = email.message_from_bytes(part[1])
-                    if um and from_venmo(hdr) and is_received_payment(_subject(hdr)) and \
+                    if um and from_venmo(hdr) and sent_to_club(hdr) and is_received_payment(_subject(hdr)) and \
                             not db.one("SELECT 1 FROM venmo_seen WHERE msg_key=?", (_msg_key(hdr),)):
                         wanted.append(int(um.group(1)))
             for u in wanted:
@@ -758,7 +828,7 @@ def place_order(request: Request, body: dict = Body(...)):
     _public_on()
     if body.get("website"):
         raise Invalid("Couldn't submit that form.")
-    _throttle(request, "order", 8, 900)
+    _throttle(request, "order", 30, 900)  # room for many phones behind one carrier address; other limits do the real work
     o = create_order(body, "online", ip=request.client.host if request.client else "")
     if body.get("news") in (True, 1, "1", "true", "on"):
         store.subscribe(o["email"], o["name"], "shop")
@@ -909,6 +979,12 @@ def product_update(pid: int, body: dict = Body(...), a=SHOP):
         if not p:
             raise Invalid("That product no longer exists.", status=404)
         was = body.get("stock_was")
+        if not isinstance(was, dict) and any(isinstance(v, int) for v in _json(p["stock"], {}).values()) and body.get("stock"):
+            raise Invalid("Reload the page and try again, so sales made meanwhile aren't undone.")
+        counted = [k for k, v in _json(p["stock"], {}).items() if isinstance(v, int)]
+        if isinstance(was, dict) and body.get("stock") and any(not str(was.get(k, "")).isdigit() for k in counted
+                                                               if k in (body.get("stock") or {})):
+            raise Invalid("Reload the page and try again, so sales made meanwhile aren't undone.")
         if isinstance(was, dict):
             # Apply the change the person made, not the number they saw, so sales made while the form was open aren't undone.
             cur, new, merged = _json(p["stock"], {}), json.loads(f["stock"]), {}
