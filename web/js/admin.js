@@ -487,6 +487,7 @@ function openSheetEditor(ev, sheet, template, onSaved) {
     slots: t.slots.map(([title, capacity, ask, serves]) => ({ title, capacity, ask_item: !!ask, ask_servings: !!serves, note: "" })) };
   const node = sheetForm(s, ev, async (saved) => { m.close(); toast(sheet ? "Sign-up saved" : "Sign-up added"); await onSaved(saved); });
   const m = modal(h("div", h("h2", sheet ? "Edit sign-up" : "New sign-up"), node), { wide: true, label: "Sign-up editor" });
+  m.el.classList.add("xwide");
 }
 
 // Specific items inside a slot (Turkey, Ham, Rolls). Each can need more than one person.
@@ -545,10 +546,10 @@ function sheetForm(s, ev, onSaved, events) {
         h("input", { type: "number", min: 0, value: sl.capacity || "", placeholder: "No limit", "aria-label": "How many", oninput: (x) => { sl.capacity = x.target.value === "" ? 0 : Number(x.target.value); } }),
         h("input", { type: "time", value: tval(sl.starts_at), "aria-label": "Start time", oninput: (x) => (sl.starts_at = toIso(x.target.value)) }),
         h("input", { type: "time", value: tval(sl.ends_at), "aria-label": "End time", oninput: (x) => (sl.ends_at = toIso(x.target.value)) }),
-        h("label.check.center", h("input", { type: "checkbox", checked: sl.ask_item, "aria-label": "Ask what they're bringing", onchange: bind("ask_item") })),
-        h("label.check.center", h("input", { type: "checkbox", checked: !!sl.ask_servings, "aria-label": "Ask how many it feeds", onchange: bind("ask_servings") })),
+        h("label.check.center", { "data-label": "Ask what" }, h("input", { type: "checkbox", checked: sl.ask_item, "aria-label": "Ask what they're bringing", onchange: bind("ask_item") })),
+        h("label.check.center", { "data-label": "Servings" }, h("input", { type: "checkbox", checked: !!sl.ask_servings, "aria-label": "Ask how many it feeds", onchange: bind("ask_servings") })),
         h("button.btn.small.ghost.items-btn", { type: "button", "aria-label": `Specific items for ${sl.title || "this slot"}`, onclick: () => editChoices(sl, drawRows) },
-          (sl.choices || []).length ? `${sl.choices.length}` : icon("plus", 14), "Items"),
+          (sl.choices || []).length ? h("span.items-n", sl.choices.length) : icon("plus", 14), "Items"),
         h("button.icon-btn", { type: "button", "aria-label": "Remove slot", onclick: () => { s.slots.splice(i, 1); drawRows(); } }, icon("trash", 18)));
     }));
   };

@@ -91,6 +91,24 @@ export function icon(name, size = 20) {
 }
 
 // A small (i) that shows a hint on hover or focus.
+// Keep an open tooltip inside the screen, or inside the popup it belongs to.
+function nudgeHint(e) {
+  const t = e.target.closest?.(".hint");
+  const b = t && t.querySelector(".hint-bubble");
+  if (!b) return;
+  b.style.setProperty("--nudge", "0px");
+  requestAnimationFrame(() => {
+    const r = b.getBoundingClientRect(), box = (t.closest("dialog[open]") || document.documentElement).getBoundingClientRect();
+    const right = Math.min(box.right, window.innerWidth) - 8, left = Math.max(box.left, 0) + 8;
+    let n = 0;
+    if (r.right > right) n = right - r.right;
+    if (r.left + n < left) n = left - r.left;
+    b.style.setProperty("--nudge", `${Math.round(n)}px`);
+  });
+}
+document.addEventListener("mouseover", nudgeHint);
+document.addEventListener("focusin", nudgeHint);
+
 export function hint(text) {
   return h("span.hint", { tabindex: 0, role: "note", "aria-label": text }, icon("info", 16), h("span.hint-bubble", text));
 }
