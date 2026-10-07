@@ -1,7 +1,7 @@
 // Admin console.
 import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
   clubNow, isoLocal, toast, modal, confirmBox, field, input, onSubmit, formErrors, values, tagChip, empty, plural, copy,
-  setTitle, media, loading, CFG, query, replaceUrl, anchor } from "./core.js";
+  setTitle, media, loading, CFG, query, replaceUrl, anchor, linkPicker } from "./core.js";
 import { moonInfo, moonSVG } from "./moon.js";
 import { results } from "./pages.js";
 
@@ -1031,18 +1031,19 @@ async function settings() {
       h("button.icon-btn", { type: "button", "aria-label": `Move ${SECTIONS[x.key]} up`, disabled: i === 0, onclick: () => { [secs[i - 1], secs[i]] = [secs[i], secs[i - 1]]; drawSecs(); } }, icon("up", 18)),
       h("button.icon-btn", { type: "button", "aria-label": `Move ${SECTIONS[x.key]} down`, disabled: i === secs.length - 1, onclick: () => { [secs[i + 1], secs[i]] = [secs[i], secs[i + 1]]; drawSecs(); } }, icon("down", 18))))));
   drawSecs();
+  const bannerLink = linkPicker(s.banner?.link || "", { name: "banner_link", label: "Banner link" });
   const home = h("form",
     field("Featured at the top", sel("spot", [["next", "The next event"], ...upcoming.map((e) => [`event:${e.id}`, `Event: ${e.title}`]), ...open.map((p) => [`poll:${p.id}`, `Poll: ${p.title}`]), ["give", "Fundraising goal"], ["none", "Nothing"]], spotVal)),
     h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Sections", hint("Turn sections on or off and set their order. You can also do this on the home page with Edit page.")), secBox),
     h("div.two", field("Banner text", input("banner_text", { value: s.banner?.text || "", placeholder: "Potluck sign-ups are open" }), { optional: true }),
-      field("Banner link", input("banner_link", { value: s.banner?.link || "", placeholder: "/events/ohana-potluck" }), { optional: true })),
+      h("label.field", h("span.field-label", "Banner link", h("span.optional", " optional")), bannerLink.el)),
     sw("banner_active", "Show the banner", s.banner?.active),
     sw("moon_caption", "Show tonight's moon name", s.moon_caption, { hintText: "The Hawaiian name for tonight's moon, under the moon on the home page." }),
     h("div", h("button.btn", { type: "submit" }, "Save")));
   onSubmit(home, (v) => {
     const [kind, id] = v.spot.split(":");
     return save({ spotlight: { kind, id: id ? Number(id) : null }, home_sections: secs, moon_caption: v.moon_caption,
-      banner: { text: v.banner_text, link: v.banner_link, active: v.banner_active } });
+      banner: { text: v.banner_text, link: bannerLink.get(), active: v.banner_active } });
   });
 
   // give

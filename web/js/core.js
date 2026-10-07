@@ -372,3 +372,28 @@ export function copy(text) {
 export function loading() { return h("div.loading", { "aria-label": "Loading" }, h("span"), h("span"), h("span")); }
 
 export function setTitle(t) { document.title = t ? `${t} | ${window.SITE?.club_name || "Mahina Club"}` : window.SITE?.club_name || "Mahina Club"; }
+
+// ---------- link picker ----------
+// Pick where something links to: a page, an upcoming event, an open poll, or a custom address.
+const SITE_PAGES = [["/events", "Events"], ["/gallery", "Gallery"], ["/polls", "Polls"], ["/give", "Give"], ["/contact", "Contact"]];
+export function linkPicker(current = "", { name = "link", label = "Goes to" } = {}) {
+  const select = h("select", { name: `${name}_pick`, "aria-label": label });
+  const custom = h("input", { type: "text", name: `${name}_custom`, placeholder: "https://… or /page", "aria-label": "Custom link", value: "" });
+  const wrap = h("span.link-picker", select, custom);
+  const sync = () => { custom.hidden = select.value !== "custom"; if (!custom.hidden) custom.focus(); };
+  select.addEventListener("change", sync);
+  const fill = (events = [], polls = []) => {
+    const opts = [["", "No link"], ...SITE_PAGES.map(([v, t]) => [v, `Page: ${t}`]),
+      ...events.map((e) => [`/events/${e.slug}`, `Event: ${e.title}`]), ...polls.map((p) => [`/polls/${p.slug}`, `Poll: ${p.title}`])];
+    const known = opts.some(([v]) => v === current);
+    clear(select).append(opts.map(([v, t]) => h("option", { value: v, selected: v === current }, t)),
+      h("option", { value: "custom", selected: !known && !!current }, "Custom link…"));
+    if (!known && current) custom.value = current;
+    custom.hidden = select.value !== "custom";
+  };
+  fill();
+  const today = isoLocal(clubNow()).slice(0, 10);
+  Promise.all([api(`/api/events?start=${today}`).catch(() => []), api("/api/polls").catch(() => [])])
+    .then(([evs, polls]) => fill(evs.filter((e) => e.status !== "cancelled"), polls.filter((p) => !p.closed)));
+  return { el: wrap, get: () => (select.value === "custom" ? custom.value.trim() : select.value) };
+}

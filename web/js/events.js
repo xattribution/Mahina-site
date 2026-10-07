@@ -327,7 +327,14 @@ export async function eventsPage() {
   setTitle("Events");
   const now = clubNow();
   const from = new Date(now); from.setMonth(from.getMonth() - 3);
-  const events = await api(`/api/events?start=${isoLocal(from).slice(0, 10)}`);
+  const [events, sheets] = await Promise.all([api(`/api/events?start=${isoLocal(from).slice(0, 10)}`), api("/api/sheets").catch(() => [])]);
+  // Sign-ups that aren't tied to an event (a meal train, a supply drive) show above the list.
+  const standalone = sheets.filter((x) => !x.event);
+  const others = standalone.length ? h("section.ev-others", h("h2.ev-month-label", "Sign-ups"),
+    h("div.sheet-list", standalone.map((x) => link(`/signups/${x.id}`, { class: "sheet-link" },
+      h("div.when", h("span.d", icon("list", 34))),
+      h("div", h("h3", x.title), x.description ? h("div.sub", x.description) : null),
+      h("div.fill-meter", x.capacity ? [h("b.num", x.capacity - x.filled), h("span.muted", " spots open")] : h("span.muted", plural(x.people, "person", "people") + " in"))))) ) : null;
   const q = query();
   const state = { view: q.get("view") === "calendar" ? "calendar" : "list", tag: q.get("tag") || "", y: now.getFullYear(), m: now.getMonth() };
   const usedTags = (window.SITE.tags || []).filter((t) => events.some((e) => e.tags.some((x) => x.id === t.id)));
@@ -341,7 +348,7 @@ export async function eventsPage() {
       h("button", { type: "button", "aria-pressed": String(state.view === "list"), onclick: () => { state.view = "list"; rerender(); } }, icon("list", 16), "List"),
       h("button", { type: "button", "aria-pressed": String(state.view === "calendar"), onclick: () => { state.view = "calendar"; rerender(); } }, icon("calendar", 16), "Calendar"));
     clear(controls).append(chips, seg);
-    clear(body).append(state.view === "list" ? eventList(list) : calendar(list, state, rerender));
+    clear(body).append(...(state.view === "list" ? [others, eventList(list)] : [calendar(list, state, rerender)]).filter(Boolean));
   }
   rerender();
   return h("div",
@@ -668,33 +675,10 @@ function slotRow(sheet, sl, open, redraw) {
 }
 
 // ---------- sign-ups index ----------
-export async function signupsPage() {
-  setTitle("Sign up");
-  const sheets = await api("/api/sheets");
-  const groups = new Map();
-  sheets.forEach((s) => {
-    const key = s.event ? s.event.slug : `s${s.id}`;
-    if (!groups.has(key)) groups.set(key, { event: s.event, sheets: [] });
-    groups.get(key).sheets.push(s);
-  });
-  const rows = [...groups.values()].map((g) => {
-    const filled = g.sheets.reduce((a, s) => a + s.filled, 0), cap = g.sheets.reduce((a, s) => a + s.capacity, 0);
-    const d = g.event ? parse(g.event.starts_at) : null;
-    return link(g.event ? `/events/${g.event.slug}#signups` : `/signups/${g.sheets[0].id}`, { class: "sheet-link" },
-      h("div.when", d ? [h("span.d", d.getDate()), h("span.m", `${monthName(d, "short")} ${weekday(d)}`)] : h("span.d", icon("list", 34))),
-      h("div", h("h3", g.event ? g.event.title : g.sheets[0].title),
-        h("div.sub", g.sheets.map((s) => s.title).join(", "))),
-      h("div.fill-meter", h("b.num", cap - filled), h("span.muted", " spots open"), h("div.bar", h("span", { style: { width: `${cap ? (filled / cap) * 100 : 0}%` } }))));
-  });
-  return h("div.wrap",
-    h("div.page-head", h("h1.h1", "Sign up")),
-    rows.length ? h("div.sheet-list", rows) : empty("No open sign-ups right now.", link("/events", { class: "btn dark" }, "See events")));
-}
-
 export async function sheetPage({ id }) {
   const s = await api(`/api/sheets/${id}`);
   setTitle(s.title);
   if (s.event) { go(`/events/${s.event.slug}#signups`, { replace: true }); return h("div"); }
-  return h("div.wrap", h("div.page-head", link("/signups", { class: "back" }, icon("left", 18), "Sign up"), h("h1.h1", s.title),
+  return h("div.wrap", h("div.page-head", link("/events", { class: "back" }, icon("left", 18), "Events"), h("h1.h1", s.title),
     s.description ? h("p.lede", s.description) : null), sheetView({ ...s, description: "" }));
 }

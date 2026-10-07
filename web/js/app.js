@@ -1,10 +1,11 @@
-import { h, $, $$, api, clear, go, href, icon, link, loading, onRender, route, fallback, startRouter, render, toast, currentPath, CFG, setTitle, honeypot, onSubmit, formErrors } from "./core.js";
+import { h, $, $$, api, clear, go, href, icon, link, loading, onRender, route, fallback, startRouter, render, toast, currentPath, CFG, setTitle, honeypot, onSubmit, formErrors, modal, linkPicker } from "./core.js";
 import { moonInfo, moonSVG } from "./moon.js";
 import * as P from "./pages.js";
 import * as E from "./events.js";
 import { EDIT, ed, tool, saveSettings, initEditing, ask } from "./edit.js";
 
-const NAV = [["/events", "Events"], ["/signups", "Sign up"], ["/gallery", "Gallery"], ["/polls", "Polls"], ["/contact", "Contact"]];
+// Sign-ups live on each event's page, so there's no separate Sign up page in the menu.
+const NAV = [["/events", "Events"], ["/gallery", "Gallery"], ["/polls", "Polls"], ["/contact", "Contact"]];
 
 export const PALETTES = {
   classic: { name: "Red, white & blue", night: "#0F2340", accent: "#C8233B" },
@@ -55,9 +56,12 @@ function banner() {
   const text = ed(h("span", b.text || ""), { placeholder: "Banner text", label: "Banner text", save: (t) => save({ text: t }) });
   return h("div.banner", { class: b.active ? "" : "off" },
     h("span.banner-edit", text,
-      tool("link", "Banner link", async () => {
-        const v = await ask("Banner link", [{ name: "link", label: "Goes to", value: b.link || "", attrs: { placeholder: "/events/ohana-potluck" } }]);
-        if (v) await save({ link: v.link }, true).catch((e) => toast(e.message, "error"));
+      tool("link", "Banner link", () => {
+        const pick = linkPicker(b.link || "");
+        const form = h("form", h("label.field", h("span.field-label", "Goes to"), pick.el), h("p.form-error"),
+          h("div.row.end", h("button.btn.ghost", { type: "button", onclick: () => m.close() }, "Cancel"), h("button.btn", { type: "submit" }, "Save")));
+        onSubmit(form, async () => { await save({ link: pick.get() }, true); m.close(); });
+        const m = modal(h("div", h("h2", "Banner link"), form), { label: "Banner link" });
       }),
       tool(b.active ? "eye" : "eyeOff", b.active ? "Hide banner" : "Show banner", () =>
         save({ active: !b.active }, true).catch((e) => toast(e.message, "error")), { "aria-pressed": String(!!b.active) })));
@@ -155,7 +159,7 @@ window.addEventListener("scroll", () => document.body.classList.toggle("scrolled
 route("/", P.home);
 route("/events", E.eventsPage);
 route("/events/:slug", E.eventPage);
-route("/signups", E.signupsPage);
+route("/signups", () => { go("/events", { replace: true }); return h("div"); });
 route("/signups/:id", E.sheetPage);
 route("/gallery", P.gallery);
 route("/polls", P.polls);

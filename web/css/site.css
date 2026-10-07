@@ -217,7 +217,7 @@ main { min-height: 60vh; }
 .moon .moon-dark { fill: var(--moon-dark); }
 .moon .moon-lit { fill: var(--moon); }
 .moon .moon-maria circle { fill: var(--moon-shade); opacity: .38; }
-.moon-caption { margin-top: 22px; font-size: 15px; color: rgba(255,255,255,.72); display: flex; align-items: center; gap: 2px; }
+.moon-caption { position: relative; z-index: 5; margin-top: 22px; font-size: 15px; color: rgba(255,255,255,.78); display: flex; align-items: center; gap: 2px; text-shadow: 0 1px 10px rgba(5,20,30,.85); }
 .moon-caption b { color: #fff; font-weight: 700; margin-left: 5px; }
 .moon-caption .hint { color: rgba(255,255,255,.5); }
 .moon-caption .hint-bubble { bottom: auto; top: calc(100% + 8px); }
@@ -865,3 +865,7 @@ body.admin-mode .edit-bar { display: none; }
 @media (max-width: 960px) { .ev-side { position: static; } }
 /* On a phone the QR is on the same screen, so offer the link instead. */
 @media (max-width: 720px) { .ev-give { grid-template-columns: 1fr; } .ev-give-qr { display: none; } }
+.link-picker { display: grid; gap: 8px; }
+.link-picker input[hidden] { display: none; }
+.ev-others { margin: 8px 0 24px; }
+.ev-others .ev-month-label { font-size: 13px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }

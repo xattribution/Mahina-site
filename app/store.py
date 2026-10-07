@@ -1,7 +1,7 @@
 """Shared queries, serializers and business rules used by the public and admin APIs."""
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from . import db, mailer
 
@@ -33,6 +33,8 @@ def safe_url(u, field, allow_path=False):
         return ""
     if allow_path and u.startswith("/") and not u.startswith("//"):
         return u
+    if allow_path and re.match(r"^[a-z0-9-]+(/[\w\-./?=&#%]*)?$", u, re.I) and "." not in u.split("/")[0]:
+        return "/" + u  # "events/potluck" means the site page /events/potluck
     if re.match(r"^https?://[^\s/$.?#][^\s]*$", u, re.I):
         return u
     raise Invalid("Use a full web address starting with https://" + (" or a page path like /events" if allow_path else "") + ".", field)
@@ -383,16 +385,39 @@ def rsvp(ev, body):
 
 
 def subscribe(email, name="", source=""):
+    """Add someone to the mailing list. Anyone newly added (or re-added) gets a short note saying so,
+    with an unsubscribe link, so no one ends up on the list without knowing."""
     email = need_email(email)
     r = db.one("SELECT * FROM subscribers WHERE email=?", (email,))
     if r:
         if not r["active"]:
             db.run("UPDATE subscribers SET active=1 WHERE id=?", (r["id"],))
+            welcome(email, r["name"] or name, r["token"], source)
         return r["token"]
     tok = db.token()
     db.run("INSERT INTO subscribers(name, email, token, source, created) VALUES (?,?,?,?,?)",
            (clean(name, 80), email, tok, source, db.now_iso()))
+    welcome(email, name, tok, source)
     return tok
+
+
+def welcome(email, name, tok, source):
+    # One note per address per day at most, so the public form can't be used to flood someone's inbox.
+    since = (db.now_local() - timedelta(days=1)).isoformat()
+    if db.one("SELECT 1 FROM outbox WHERE to_email=? AND kind='welcome' AND created > ?", (email, since)):
+        return
+    club = db.get_setting("club_name") or "Mahina Club"
+    first = (clean(name, 80).split() or [""])[0]
+    lead = (f"An organizer added you to the {club} email list." if source == "admin"
+            else f"You're on the {club} email list.")
+    h, t = mailer.render(f"You're on the {club} list", [
+        f"Aloha{', ' + first if first else ''}. {lead}",
+        "We send event invites and club news, usually a few times a month.",
+        "Didn't sign up, or added by mistake? Use the Unsubscribe link below and you won't get club emails. "
+        "That page can also delete your info completely."],
+        button=("See what's coming up", f"{mailer.site_url()}/events"),
+        footer_link=("Unsubscribe", f"{mailer.site_url()}/unsubscribe/{tok}"))
+    mailer.queue(email, f"You're on the {club} email list", h, t, kind="welcome")
 
 
 def forget(email):
