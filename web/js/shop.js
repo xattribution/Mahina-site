@@ -144,7 +144,7 @@ export async function orderPage({ code }) {
       if (!box.isConnected || ++n > 180) return stop();
       if (document.hidden) return;
       try {
-        const next = await api(`/api/shop/orders/${o.code}`);
+        const next = await api(`/api/shop/orders/${encodeURIComponent(o.code)}`);
         if (next.status !== o.status) { o = next; draw(); if (o.status === "paid") toast("Payment received. Mahalo!"); }
         if (o.status !== "pending") stop();
       } catch {}

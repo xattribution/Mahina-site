@@ -37,7 +37,10 @@ AMOUNT_RE = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\b")
 SUBJECT_RE = re.compile(r"\b(?:paid you|sent you)\s+\$\s?(\d{1,3}(?:,\d{3})*|\d+)\.(\d{2})\s*$", re.I)
 ONLINE_PER_ITEM, ONLINE_PER_ORDER, ONLINE_OPEN_PER_EMAIL = 10, 20, 3
 HOLD_HOURS = {"online": 24, "table": 24}  # unpaid orders release their items after this long
-ONLINE_OPEN_PER_NETWORK = 3  # open unpaid online orders from one network (IPv6: one /64)
+# Open unpaid online orders from one network. A phone on IPv6 gets its own /64, so 3 is plenty. Carriers share one IPv4
+# address among many phones (carrier-grade NAT), so IPv4 gets more room; the per-email and half-stock limits still apply.
+ONLINE_OPEN_PER_NETWORK = 3
+ONLINE_OPEN_PER_IPV4 = 10
 MAX_PRICE = 1_000_000  # $10,000 in cents
 MASK = "••••••••"
 
@@ -244,10 +247,11 @@ def create_order(body, channel, by=None, ip=None):
     c = _begin()
     try:
         nk = network_key(ip) if online else ""
+        net_cap = ONLINE_OPEN_PER_NETWORK if ":" in (ip or "") else ONLINE_OPEN_PER_IPV4
         if online and (c.execute("SELECT COUNT(*) FROM orders WHERE status='pending' AND channel='online' AND lower(email)=?",
                                  (em,)).fetchone()[0] >= ONLINE_OPEN_PER_EMAIL or
                        c.execute("SELECT COUNT(*) FROM orders WHERE status='pending' AND channel='online' AND ip_key=?",
-                                 (nk,)).fetchone()[0] >= ONLINE_OPEN_PER_NETWORK):
+                                 (nk,)).fetchone()[0] >= net_cap):
             raise Invalid("You have orders waiting for payment. Pay for those first, or contact us.")
         lines, total = reserve(c, body.get("items"), online=online)
         code = new_code(c)
@@ -837,7 +841,7 @@ def team_settings(body: dict = Body(...), a=ADMIN):
             new["password"] = str(raw.get("password") or "")[:500]
         if any(new[k] != (cur.get(k) or ("INBOX" if k == "folder" else "")) for k in new):
             # This mailbox decides which orders count as paid, so changing it needs the same check as the Venmo handle.
-            stepup.require(a)
+            stepup.require(a, "the Venmo payment mailbox")
             imap_new = (cur, new)
     if "enabled" in body:
         db.set_setting("shop_enabled", bool(body["enabled"]))

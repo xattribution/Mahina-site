@@ -252,6 +252,8 @@ ADDED_COLUMNS = [
     ("outbox", "reply_to", "TEXT DEFAULT ''"),
     ("orders", "sent_to", "TEXT DEFAULT '[]'"),
     ("sessions", "stepup_until", "TEXT"),
+    ("sessions", "stepup_for", "TEXT"),
+    ("plan_items", "parent_id", "INTEGER"),  # a step inside a task (one level deep)
     ("orders", "ip_key", "TEXT DEFAULT ''"),     # a one-way hash of the buyer's network, only to cap unpaid holds
     ("orders", "expired", "INTEGER DEFAULT 0"),  # released for non-payment (not cancelled by a person)
 ]

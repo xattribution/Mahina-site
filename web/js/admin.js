@@ -83,7 +83,7 @@ const NAV = [["", "Overview", "home", null], ["planning", "Planning", "clipboard
   ["signups", "Sign-ups", "list", ["signups", "events"]], ["polls", "Polls", "poll", ["polls"]], ["gallery", "Gallery", "image", ["photos"]],
   ["messages", "Messages", "inbox", ["messages"]], ["people", "People", "people", ["people"]], ["email", "Email", "mail", ["email"]],
   ["shop", "Shop", "bag", ["shop"]],
-  ["accounts", "Accounts", "shield", "admin"], ["activity", "Activity", "history", "admin"], ["settings", "Settings", "gear", "admin"]];
+  ["accounts", "Team", "shield", ["team"]], ["activity", "Activity", "history", "admin"], ["settings", "Settings", "gear", "admin"]];
 const navAllowed = ([, , , who]) => !who || (who === "admin" ? isAdmin() : can(...who));
 
 function layout(section, main) {
@@ -1149,7 +1149,7 @@ async function settings() {
     sec("officers", "Officers", officers, "Listed on the Contact page."),
     sec("gallery", "Gallery", gal),
     sec("email", "Email", mail),
-    sec("accounts", "Accounts", h("p.muted", { style: { margin: 0 } }, "Admin and member accounts are under ", aLink("/accounts", {}, "Accounts"), ".")));
+    sec("accounts", "Accounts", h("p.muted", { style: { margin: 0 } }, "Admin and member accounts are under ", aLink("/accounts", {}, "Team"), ".")));
   const target = anchor();
   if (target) setTimeout(() => document.getElementById(target)?.scrollIntoView({ behavior: "smooth" }), 80);
   return page;
@@ -1213,7 +1213,7 @@ function planBoard(eid, first) {
   const load = async () => { data = await api(`/api/admin/planning/${eid}`); draw(); };
   const patch = async (i, body) => { Object.assign(i, await api(`/api/admin/planning/items/${i.id}`, { method: "PATCH", body })); data.totals = totals(); };
   const totals = () => {
-    const buy = data.items.filter((i) => i.kind === "buy"), tasks = data.items.filter((i) => i.kind === "task");
+    const buy = data.items.filter((i) => i.kind === "buy"), tasks = data.items.filter((i) => i.kind === "task" && !i.parent_id);
     return { tasks: tasks.length, tasks_done: tasks.filter((i) => i.done).length, buy: buy.length, bought: buy.filter((i) => i.done).length,
       estimate: buy.reduce((a, i) => a + (i.est_cost || 0), 0), spent: buy.filter((i) => i.done).reduce((a, i) => a + (i.cost || 0), 0) };
   };
@@ -1230,7 +1230,7 @@ function planBoard(eid, first) {
   const who = (i) => i.assignee ? h("span.who-chip", { class: i.assignee_id === ME.id ? "me" : "" }, i.assignee_id === ME.id ? "You" : i.assignee) : h("span.muted.small", "Unassigned");
 
   function itemRow(i) {
-    const row = h("div.plan-row", { class: (i.done ? "done" : "") + (i.kind === "buy" ? " buy" : "") },
+    const row = h("div.plan-row", { class: (i.done ? "done" : "") + (i.kind === "buy" ? " buy" : "") + (i.parent_id ? " step" : "") },
       doneBox(i, async (done) => { await patch(i, { done }); draw(); }),
       h("div.plan-main",
         h("button.plan-title.linkish", { type: "button", onclick: () => editItem(i) }, i.title, i.qty ? h("span.muted", ` ×${i.qty}`) : null),
@@ -1320,18 +1320,76 @@ function planBoard(eid, first) {
         h("p", n.body))) : h("p.muted.small", "No notes yet."));
   }
 
+  // Steps: smaller to-dos inside a task, each with its own person.
+  function stepForm(parent) {
+    const f = h("form.plan-add.step-add",
+      h("input", { name: "title", required: true, placeholder: "Add a step", "aria-label": `Step for ${parent.title}` }),
+      assigneeSelect({}, "assignee"),
+      h("button.btn.small.ghost", { type: "submit" }, icon("plus", 16), "Add"));
+    f.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const v = values(f);
+      if (!v.title?.trim()) return;
+      try {
+        const item = await api(`/api/admin/planning/${eid}/items`, { method: "POST", body: { kind: "task", parent_id: parent.id, title: v.title, ...assigneeBody(v) } });
+        data.items.push(item); openSteps.add(parent.id); draw();
+        $(`.step-add[data-for="${parent.id}"] input[name=title]`, wrap)?.focus();
+        if (item.assignee_id && item.assignee_id !== ME.id) toast(`Added. ${item.assignee} gets an email.`);
+      } catch (err) { toast(err.message, "error"); }
+    });
+    f.dataset.for = parent.id;
+    return f;
+  }
+  const openSteps = new Set();
+  function taskBlock(i) {
+    const steps = data.items.filter((s) => s.parent_id === i.id).sort((a, b) => a.done - b.done);
+    const showing = openSteps.has(i.id);
+    return h("div.plan-task",
+      itemRow(i),
+      steps.length ? h("div.plan-steps", steps.map(itemRow)) : null,
+      showing ? stepForm(i) : h("button.step-toggle", { type: "button", onclick: () => { openSteps.add(i.id); draw(); $(`.step-add[data-for="${i.id}"] input`, wrap)?.focus(); } },
+        icon("plus", 14), steps.length ? "Add a step" : "Break into steps"));
+  }
+
   function section(kind, title, iconName) {
-    const list = data.items.filter((i) => i.kind === kind).sort((a, b) => a.done - b.done);
+    const list = data.items.filter((i) => i.kind === kind && !i.parent_id).sort((a, b) => a.done - b.done);
     const open = list.filter((i) => !i.done).length;
     return h("section.plan-sec", { "data-kind": kind },
       h("h3", icon(iconName, 18), title, h("span.muted", list.length ? `${open} open` : "")),
-      h("div.plan-list", list.length ? list.map(itemRow) : h("p.muted.small.plan-empty", kind === "buy" ? "Nothing on the list yet." : "No tasks yet.")),
+      h("div.plan-list", list.length ? list.map(kind === "task" ? taskBlock : itemRow) : h("p.muted.small.plan-empty", kind === "buy" ? "Nothing on the list yet." : "No tasks yet.")),
       addForm(kind));
+  }
+
+  // Email the to-do list to teammates: each gets their own open items, and the whole list if picked.
+  function sendTasks() {
+    const open = data.items.filter((i) => !i.done);
+    const count = (id) => open.filter((i) => i.assignee_id === id).length;
+    const people = [...data.team].sort((a, b) => count(b.id) - count(a.id) || a.name.localeCompare(b.name));
+    let scope = "theirs";
+    const seg = h("div.seg", [["theirs", "Their own tasks"], ["all", "The whole list"]].map(([v, t]) => h("button", { type: "button", "aria-pressed": String(v === scope),
+      onclick: (e) => { scope = v; $$("button", seg).forEach((b) => b.setAttribute("aria-pressed", String(b === e.currentTarget))); } }, t)));
+    const form = h("form.stack",
+      h("div.field", h("span.field-label", "Send to"),
+        h("div.send-to", people.map((p) => h("label.check", h("input", { type: "checkbox", name: "to", value: p.id, checked: count(p.id) > 0 }),
+          h("span", p.id === ME.id ? `${p.name} (you)` : p.name, count(p.id) ? h("span.muted", ` · ${count(p.id)} open`) : null)))),
+        h("span.field-error")),
+      h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Include", hint("Everyone always sees their own open tasks and steps first.")), seg),
+      field("Note", h("textarea", { name: "note", rows: 2, maxlength: 1000, placeholder: "Setup crew, meet at the pavilion at 9." }), { optional: true }),
+      h("p.form-error"),
+      h("div.row.end", h("button.btn.ghost", { type: "button", onclick: () => m.close() }, "Cancel"), h("button.btn", { type: "submit" }, icon("send", 16), "Send")));
+    onSubmit(form, async (v) => {
+      const to = $$("input[name=to]:checked", form).map((x) => Number(x.value));
+      const r = await api(`/api/admin/planning/${eid}/send`, { method: "POST", body: { to, scope, note: v.note } });
+      m.close(); toast(`Sent to ${plural(r.sent, "person", "people")}`);
+    });
+    const m = modal(h("div", h("h2", "Send the to-do list"), form), { label: "Send tasks", wide: true });
   }
 
   function draw() {
     drawSummary();
-    clear(wrap).append(summary, h("div.plan-grid", h("div", section("task", "Tasks and volunteers", "check"), section("buy", "Shopping list", "cart")), notes()));
+    clear(wrap).append(h("div.plan-top", summary,
+      h("button.btn.small.ghost", { type: "button", onclick: sendTasks, disabled: !data.items.some((i) => !i.done) }, icon("send", 16), "Send tasks")),
+      h("div.plan-grid", h("div", section("task", "Tasks and volunteers", "check"), section("buy", "Shopping list", "cart")), notes()));
   }
   if (data) draw(); else load().catch((e) => clear(wrap).append(h("p.form-error", e.message)));
   return wrap;
@@ -1348,10 +1406,12 @@ const PERM_HELP = {
   people: "See the mailing list. Add and delete people.",
   email: "Email the mailing list and event attendees.",
   shop: "Sell at the table, see orders, and edit products.",
+  team: "See the team and invite members, with access they have themselves.",
 };
 
-function accountForm(acct, perms, defaults, onDone) {
+function accountForm(acct, perms, defaults, onDone, grantable = Object.keys(perms)) {
   const isNew = !acct;
+  const memberMode = !isAdmin();  // members with Team access: invite members, with access they have themselves
   const pwOn = STATE.password_login !== false;
   const st = { role: acct?.role || "member", perms: new Set(acct ? acct.perms : defaults), mode: "invite" };
   const roleBox = h("div");
@@ -1362,7 +1422,7 @@ function accountForm(acct, perms, defaults, onDone) {
       hint(st.role === "admin" ? "Admins can do everything, including settings, colors, the home page, accounts, and the activity log." : "Members get only what you tick below. They can't change settings or the site's layout."));
     permBox.hidden = st.role === "admin";
   };
-  clear(permBox).append(Object.entries(perms).map(([k, name]) => h("label.perm", h("input", { type: "checkbox", checked: st.perms.has(k), onchange: (e) => e.target.checked ? st.perms.add(k) : st.perms.delete(k) }),
+  clear(permBox).append(Object.entries(perms).filter(([k]) => grantable.includes(k)).map(([k, name]) => h("label.perm", h("input", { type: "checkbox", checked: st.perms.has(k), onchange: (e) => e.target.checked ? st.perms.add(k) : st.perms.delete(k) }),
     h("span", h("b", name), h("span.muted.small", PERM_HELP[k] || "")))));
   drawRole();
   // New people get an emailed invite by default, so no one has to make up a password for them.
@@ -1382,13 +1442,13 @@ function accountForm(acct, perms, defaults, onDone) {
     nameIn.required = !invite;
   };
   const form = h("form.stack",
-    isNew ? h("div.seg", { role: "group", "aria-label": "How to add them" },
+    isNew && !memberMode ? h("div.seg", { role: "group", "aria-label": "How to add them" },
       h("button", { type: "button", "data-mode": "invite", onclick: () => { st.mode = "invite"; drawMode(); } }, icon("mail", 16), "Email an invite"),
       h("button", { type: "button", "data-mode": "direct", onclick: () => { st.mode = "direct"; drawMode(); } }, pwOn ? "Set a password" : "Add directly"),
       hint("An invite emails a one-time link. They pick their own name and password. The link expires in 7 days.")) : null,
     h("div.two", field("Name", input("name", { value: acct?.name || "", autocomplete: "off" })),
       isNew ? field("Email", input("email", { type: "email", required: true, autocomplete: "off" })) : h("label.field", h("span.field-label", "Email"), h("div.muted", { style: { padding: "12px 0" } }, acct.email))),
-    h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Role"), roleBox),
+    memberMode ? null : h("div", h("span.field-label", { style: { marginBottom: "8px" } }, "Role"), roleBox),
     h("div", permBox),
     pwBox,
     h("p.form-error"),
@@ -1421,9 +1481,10 @@ async function accounts() {
   const [data, invites] = await Promise.all([api("/api/admin/admins"), api("/api/admin/invites")]);
   const reload = () => go("/team/accounts", { replace: true });
   const open = (acct) => {
-    const m = modal(h("div", h("h2", acct ? acct.name : "Add someone"), accountForm(acct, data.perms, data.default_member_perms, (msg, linkInfo) => {
+    if (acct && !isAdmin()) return;  // members invite; only admins edit accounts
+    const m = modal(h("div", h("h2", acct ? acct.name : isAdmin() ? "Add someone" : "Invite someone"), accountForm(acct, data.perms, data.default_member_perms, (msg, linkInfo) => {
       m.close(); if (msg) toast(msg); reload(); if (linkInfo) setTimeout(() => showInviteLink(linkInfo), 150);
-    })), { label: "Account", wide: true });
+    }, data.grantable)), { label: "Account", wide: true });
   };
   const pending = invites.length ? h("section.a-section", h("h2", "Invites"),
     h("div.tbl-wrap", h("table.tbl",
@@ -1433,7 +1494,7 @@ async function accounts() {
         h("td", pill(i.role === "admin" ? "published" : "draft", i.role === "admin" ? "Admin" : "Member")),
         h("td.sub", `${i.invited_by}, ${ago(i.created)}`),
         h("td.sub", i.expired ? pill("closed", "Expired") : `Works until ${dateCell(i.expires)}`),
-        h("td.actions", h("div.row", { style: { gap: "4px", flexWrap: "nowrap", justifyContent: "flex-end" } },
+        h("td.actions", !isAdmin() && i.role === "admin" ? null : h("div.row", { style: { gap: "4px", flexWrap: "nowrap", justifyContent: "flex-end" } },
           h("button.btn.small.ghost", { type: "button", onclick: async () => {
             const r = await api(`/api/admin/invites/${i.id}/resend`, { method: "POST" });
             if (r.emailed) toast(`New link sent to ${i.email}`); else showInviteLink({ link: r.link, email: i.email, expires: r.expires });
@@ -1443,15 +1504,15 @@ async function accounts() {
             if (await confirmBox(`Cancel the invite for ${i.email}? The link stops working.`, { ok: "Cancel invite" })) { await api(`/api/admin/invites/${i.id}`, { method: "DELETE" }); toast("Invite cancelled"); reload(); }
           } }, icon("close", 16)))))))))) : null;
   const access = (a) => a.role === "admin" ? h("span", "Everything") : a.perms.length ? h("span", a.perms.map((p) => data.perms[p]).join(", ")) : h("span.muted", "Nothing yet");
-  return h("div", head("Accounts", { actions: [h("button.btn", { type: "button", onclick: () => open(null) }, icon("plus", 18), "Add someone")] }),
+  return h("div", head("Team", { actions: [h("button.btn", { type: "button", onclick: () => open(null) }, icon("plus", 18), isAdmin() ? "Add someone" : "Invite someone")] }),
     h("div.tbl-wrap", h("table.tbl",
       h("thead", h("tr", h("th", "Person"), h("th", "Role"), h("th", "Access"), h("th", "Last sign-in"), h("th"))),
-      h("tbody", data.accounts.map((a) => h("tr.click", { onclick: (e) => !e.target.closest("button") && open(a) },
+      h("tbody", data.accounts.map((a) => h(isAdmin() ? "tr.click" : "tr", { onclick: (e) => isAdmin() && !e.target.closest("button") && open(a) },
         h("td", h("span.strong", a.name, a.id === ME.id ? h("span.muted", " (you)") : null), h("div.sub", a.email)),
         h("td", pill(a.role === "admin" ? "published" : "draft", a.role === "admin" ? "Admin" : "Member")),
         h("td.sub", access(a)),
         h("td.sub", a.last_login ? ago(a.last_login) : "Never"),
-        h("td.actions", a.id === ME.id ? null : h("button.icon-btn", { type: "button", "aria-label": `Remove ${a.name}`, onclick: async () => {
+        h("td.actions", a.id === ME.id || !isAdmin() ? null : h("button.icon-btn", { type: "button", "aria-label": `Remove ${a.name}`, onclick: async () => {
           if (await confirmBox(`Remove ${a.name}'s account? They're signed out right away. Tasks assigned to them stay, with their name.`, { ok: "Remove" })) {
             await api(`/api/admin/admins/${a.id}`, { method: "DELETE" }); toast("Removed"); reload();
           }

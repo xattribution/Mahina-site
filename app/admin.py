@@ -51,6 +51,7 @@ PERMS = {
     "people": "People",
     "email": "Email",
     "shop": "Shop",
+    "team": "Team",
 }
 DEFAULT_MEMBER_PERMS = ["planning"]
 
@@ -1179,7 +1180,7 @@ def settings_update(body: dict = Body(...), a=AdminOnly):
     if venmo_changed or smtp_changed:
         # Where money goes, and the email server that carries confirmation codes, need a fresh confirmation first.
         # Before email is set up, that's the admin's password.
-        stepup.require(a)
+        stepup.require(a, "the club Venmo handle" if venmo_changed else "the email server")
     for k in PUBLIC_KEYS:
         if k in body:
             db.set_setting(k, body[k])
@@ -1211,18 +1212,19 @@ def settings_update(body: dict = Body(...), a=AdminOnly):
 
 
 @router.post("/stepup/start")
-def stepup_start(a=AdminOnly):
-    return stepup.start(a)
+def stepup_start(body: dict = Body(default={}), a=can("team")):
+    return stepup.start(a, resend=bool((body or {}).get("resend")))
 
 
 @router.post("/stepup/check")
-def stepup_check(request: Request, response: Response, body: dict = Body(...), a=AdminOnly):
+def stepup_check(request: Request, response: Response, body: dict = Body(...), a=can("team")):
     r = stepup.check(a, body)
-    # A fresh session cookie carries the pass. The old one stops working, so a copied cookie can't ride along.
+    # A fresh session cookie carries the pass. The old session never gets it and is deleted, so a copied cookie
+    # can't ride along, not even for a moment.
     tok = auth.create_session(a["id"])
-    db.run("UPDATE sessions SET stepup_until=(SELECT stepup_until FROM sessions WHERE token=?) WHERE token=?",
-           (a["token"], auth._digest(tok)))
-    db.run("DELETE FROM sessions WHERE token=?", (a["token"],))
+    with db.tx() as c:
+        c.execute("UPDATE sessions SET stepup_until=? WHERE token=?", (stepup.pass_until(), auth._digest(tok)))
+        c.execute("DELETE FROM sessions WHERE token=?", (a["token"],))
     response.set_cookie(COOKIE, tok, max_age=auth.SESSION_DAYS * 86400, httponly=True, samesite="strict",
                         secure=is_https(request), path="/")
     audit(a, "Confirmed it's them for a protected change")
@@ -1258,10 +1260,23 @@ def admin_count():
     return db.one("SELECT COUNT(*) n FROM admins WHERE role='admin'")["n"]
 
 
+def member_may_grant(a, role, perms):
+    """Members with Team access invite members only, and only with access they have themselves."""
+    if a["role"] == "admin":
+        return
+    if role != "member":
+        raise Invalid("Only an admin can add an admin.", status=403)
+    extra = set(perms) - set(a["perms"])
+    if extra:
+        raise Invalid(f"You can only give access you have yourself. Ask an admin for {', '.join(PERMS[p] for p in sorted(extra))}.", status=403)
+
+
 @router.get("/admins")
-def admins(a=AdminOnly):
+def admins(a=can("team")):
     rows = db.q("SELECT * FROM admins ORDER BY role='member', name COLLATE NOCASE")
-    return {"accounts": [account_out(r) for r in rows], "perms": PERMS, "default_member_perms": DEFAULT_MEMBER_PERMS}
+    grantable = sorted(PERMS) if a["role"] == "admin" else sorted(p for p in a["perms"] if p in PERMS)
+    return {"accounts": [account_out(r) for r in rows], "perms": PERMS, "grantable": grantable,
+            "default_member_perms": [p for p in DEFAULT_MEMBER_PERMS if p in grantable]}
 
 
 @router.get("/team")
@@ -1276,7 +1291,7 @@ def admin_create(body: dict = Body(...), a=AdminOnly):
     if db.one("SELECT id FROM admins WHERE email=?", (email,)):
         raise Invalid("That person already has an account.", "email")
     role = "member" if body.get("role") == "member" else "admin"
-    stepup.require(a)  # new accounts outlive a stolen session, so making one takes the same check as payment settings
+    stepup.require(a, "team accounts")  # new accounts outlive a stolen session, so making one takes the same check as payment settings
     perms = clean_perms(body.get("perms") if "perms" in body else DEFAULT_MEMBER_PERMS) if role == "member" else []
     pw_hash = ""
     if auth.password_login_enabled():
@@ -1305,7 +1320,7 @@ def admin_update(aid: int, request: Request, body: dict = Body(...), a=AdminOnly
             raise Invalid("Keep at least one admin.")
     perms = clean_perms(body.get("perms", json.loads(row["perms"] or "[]"))) if role == "member" else []
     if role != row["role"] or body.get("password"):
-        stepup.require(a)  # role changes and setting someone's password take the same check as payment settings
+        stepup.require(a, "team accounts")  # role changes and setting someone's password take the same check as payment settings
     new_hash = None
     if body.get("password"):
         if aid == a["id"]:
@@ -1334,7 +1349,7 @@ def admin_delete(aid: int, a=AdminOnly):
     if row["role"] == "admin" and admin_count() <= 1:
         raise Invalid("Keep at least one admin.")
     if row["role"] == "admin":
-        stepup.require(a)
+        stepup.require(a, "team accounts")
     db.run("DELETE FROM sessions WHERE admin_id=?", (aid,))
     db.run("DELETE FROM admins WHERE id=?", (aid,))
     audit(a, "Removed an account", row["name"])
@@ -1351,7 +1366,7 @@ def change_password(request: Request, body: dict = Body(...), a=Signed):
         if not ok:
             raise Invalid("Your current password is wrong.", "current")
     elif row["role"] == "admin":
-        stepup.require(a)  # a first password for a single-sign-on admin: prove it's them some other way first
+        stepup.require(a, "your password")  # a first password for a single-sign-on admin: prove it's them some other way first
     pw = auth.check_new_password(body.get("new") or "", email=row["email"], name=row["name"], field="new")
     db.run("UPDATE admins SET pw_hash=? WHERE id=?", (auth.hash_password(pw), a["id"]))
     auth.end_other_sessions(a["id"], request.cookies.get(COOKIE))
@@ -1391,19 +1406,20 @@ def send_invite(a, inv_id, email, name, role):
 
 
 @router.get("/invites")
-def invites(a=AdminOnly):
+def invites(a=can("team")):
     return [invite_out(r) for r in db.q("SELECT * FROM invites WHERE used_at IS NULL ORDER BY created DESC")]
 
 
 @router.post("/invites")
-def invite_create(body: dict = Body(...), a=AdminOnly):
+def invite_create(body: dict = Body(...), a=can("team")):
     email = store.need_email(body.get("email"))
     name = clean(body.get("name"), 80)
     if db.one("SELECT id FROM admins WHERE email=?", (email,)):
         raise Invalid("That person already has an account.", "email")
     role = "admin" if body.get("role") == "admin" else "member"
-    stepup.require(a)
     perms = clean_perms(body.get("perms") if "perms" in body else DEFAULT_MEMBER_PERMS) if role == "member" else []
+    member_may_grant(a, role, perms)
+    stepup.require(a, "team accounts")
     db.run("DELETE FROM invites WHERE email=? AND used_at IS NULL", (email,))  # one open invite per person
     iid = db.run("INSERT INTO invites(token, email, name, role, perms, invited_by, invited_by_name, created, expires) "
                  "VALUES (?,?,?,?,?,?,?,?,?)", (secrets.token_hex(16), email, name, role, json.dumps(perms), a["id"], a["name"],
@@ -1418,11 +1434,12 @@ def invite_create(body: dict = Body(...), a=AdminOnly):
 
 
 @router.post("/invites/{iid}/resend")
-def invite_resend(iid: int, a=AdminOnly):
+def invite_resend(iid: int, a=can("team")):
     r = db.one("SELECT * FROM invites WHERE id=? AND used_at IS NULL", (iid,))
     if not r:
         raise Invalid("That invite was already used or removed.", status=404)
-    stepup.require(a)
+    member_may_grant(a, r["role"], clean_perms(json.loads(r["perms"] or "[]")))
+    stepup.require(a, "team accounts")
     link, expires = send_invite(a, iid, r["email"], r["name"], r["role"])
     audit(a, "Resent an invite", r["name"] or mask_email(r["email"]))
     ready = mailer.smtp_config()["ready"]
@@ -1430,8 +1447,10 @@ def invite_resend(iid: int, a=AdminOnly):
 
 
 @router.delete("/invites/{iid}")
-def invite_revoke(iid: int, a=AdminOnly):
+def invite_revoke(iid: int, a=can("team")):
     r = db.one("SELECT * FROM invites WHERE id=? AND used_at IS NULL", (iid,))
+    if r and a["role"] != "admin" and r["role"] == "admin":
+        raise Invalid("Only an admin can cancel an admin invite.", status=403)
     if r:
         db.run("DELETE FROM invites WHERE id=?", (iid,))
         audit(a, "Cancelled an invite", r["name"] or mask_email(r["email"]))
@@ -1548,9 +1567,10 @@ def plan_event(eid):
 
 def plan_totals(items):
     buy = [i for i in items if i["kind"] == "buy"]
+    tasks = [i for i in items if i["kind"] == "task" and not i.get("parent_id")]
     return {
-        "tasks": sum(1 for i in items if i["kind"] == "task"),
-        "tasks_done": sum(1 for i in items if i["kind"] == "task" and i["done"]),
+        "tasks": len(tasks),
+        "tasks_done": sum(1 for i in tasks if i["done"]),
         "buy": len(buy), "bought": sum(1 for i in buy if i["done"]),
         "estimate": round(sum((i["est_cost"] or 0) for i in buy), 2),
         "spent": round(sum((i["cost"] or 0) for i in buy if i["done"]), 2),
@@ -1625,10 +1645,18 @@ def notify_assignee(a, item, ev):
 def plan_add(eid: int, body: dict = Body(...), a=can("planning", "events")):
     ev = plan_event(eid)
     kind = body.get("kind") if body.get("kind") in PLAN_KINDS else "task"
+    parent = None
+    if body.get("parent_id") not in (None, ""):
+        # Steps live one level inside a task of the same event.
+        parent = db.one("SELECT * FROM plan_items WHERE id=? AND event_id=? AND kind='task' AND parent_id IS NULL",
+                        (int(body["parent_id"]) if str(body["parent_id"]).isdigit() else 0, eid))
+        if not parent:
+            raise Invalid("That task is gone. Refresh the page.", status=404)
+        kind = "task"
     f = plan_fields(body)
     n = db.one("SELECT COALESCE(MAX(sort),0)+1 n FROM plan_items WHERE event_id=? AND kind=?", (eid, kind))["n"]
-    iid = db.run(f"INSERT INTO plan_items(event_id, kind, {','.join(f)}, sort, created_by, created) "
-                 f"VALUES (?,?,{','.join('?' * len(f))},?,?,?)", (eid, kind, *f.values(), n, a["name"], db.now_iso()))
+    iid = db.run(f"INSERT INTO plan_items(event_id, kind, parent_id, {','.join(f)}, sort, created_by, created) "
+                 f"VALUES (?,?,?,{','.join('?' * len(f))},?,?,?)", (eid, kind, parent["id"] if parent else None, *f.values(), n, a["name"], db.now_iso()))
     item = plan_item_out(db.one(ITEMS_SQL + " WHERE i.id=?", (iid,)))
     audit(a, "Added to the shopping list" if kind == "buy" else "Added a task", f"{f['title']}, {ev['title']}")
     notify_assignee(a, item, ev)
@@ -1661,8 +1689,50 @@ def plan_delete(iid: int, a=can("planning", "events")):
     old = db.one("SELECT * FROM plan_items WHERE id=?", (iid,))
     if old:
         audit(a, "Removed", f"{old['title']}, {title_of('events', old['event_id'])}")
-        db.run("DELETE FROM plan_items WHERE id=?", (iid,))
+        db.run("DELETE FROM plan_items WHERE id=? OR parent_id=?", (iid, iid))  # a task's steps go with it
     return {"ok": True}
+
+
+@router.post("/planning/{eid}/send")
+def plan_send(eid: int, body: dict = Body(...), a=can("planning", "events")):
+    """Email the event's to-do list to chosen teammates: each gets their own open items first, and the whole list
+    if asked. Replies go to whoever sent it."""
+    from .main import hit
+    ev = plan_event(eid)
+    people = {r["id"]: r for r in db.q("SELECT id, name, email FROM admins")}
+    to = [people[int(i)] for i in (body.get("to") or [])[:50] if str(i).isdigit() and int(i) in people]
+    if not to:
+        raise Invalid("Pick who to send it to.", "to")
+    hit(("plan-send", a["id"]), 20, 3600, "That's a lot of task emails for one hour. Try again later.")
+    whole = body.get("scope") == "all"
+    note = clean(body.get("note"), 1000, multiline=True)
+    items = [plan_item_out(i) for i in db.q(ITEMS_SQL + " WHERE i.event_id=? AND i.done=0 ORDER BY i.kind DESC, i.sort, i.id", (eid,))]
+    titles = {i["id"]: i["title"] for i in db.q("SELECT id, title FROM plan_items WHERE event_id=?", (eid,))}
+    def line(i, with_who=False):
+        label = ("Buy" if i["kind"] == "buy" else "Step" if i.get("parent_id") else "Task") + (f", due {i['due'][:10]}" if i.get("due") else "")
+        text = i["title"] + (f" ×{i['qty']}" if i.get("qty") else "") + (f" (part of {titles.get(i['parent_id'], 'a task')})" if i.get("parent_id") else "")
+        if with_who:
+            text += f" — {i['assignee'] or 'unassigned'}"
+        return (label, text)
+    sent = 0
+    for p in to:
+        mine = [i for i in items if i["assignee_id"] == p["id"]]
+        blocks = [f"{a['name']} sent you the to-do list for {ev['title']} ({mailer.fmt_when(ev)})."]
+        if note:
+            blocks.append(f"Note: {note}")
+        blocks.append("Yours:" if mine else "Nothing is assigned to you right now.")
+        if mine:
+            blocks.append(("rows", [line(i) for i in mine]))
+        rest = [i for i in items if i["assignee_id"] != p["id"]]
+        if whole and rest:
+            blocks += ["Everything else:", ("rows", [line(i, True) for i in rest])]
+        h, t = mailer.render(f"To-do: {ev['title']}", blocks, button=("Open the plan", f"{mailer.site_url()}/team/planning/{ev['id']}"))
+        me = db.one("SELECT email FROM admins WHERE id=?", (a["id"],))
+        mailer.queue(p["email"], f"To-do for {ev['title']}" + (f": {len(mine)} for you" if mine else ""), h, t, kind="assignment",
+                     sender={"name": "", "from": "", "reply_to": me["email"] if me else ""})
+        sent += 1
+    audit(a, "Sent the task list", f"{ev['title']} to {', '.join(p['name'] for p in to)}")
+    return {"sent": sent}
 
 
 @router.post("/planning/{eid}/notes")

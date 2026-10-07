@@ -252,6 +252,10 @@
       Object.assign(item, shape(body, item));
       return wait(clone(item));
     }
+    if ((m = path.match(/^\/api\/admin\/planning\/(\d+)\/send$/))) {
+      if (!(body.to || []).length) throw new DemoError("Pick who to send it to.", 400, "to");
+      return wait({ sent: body.to.length });
+    }
     if ((m = path.match(/^\/api\/admin\/planning\/(\d+)\/notes$/))) {
       const a = D["/api/admin/state"].admin;
       return wait({ id: Date.now(), author_id: a.id, author: a.name, body: body.body, created: new Date().toISOString().slice(0, 19) });

@@ -487,3 +487,15 @@ form .seg .hint { margin: 0 8px 0 6px; }
 .send-to { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 180px), 1fr)); gap: 8px 16px; padding: 4px 0; }
 .orders-tbl tr.focus td { background: var(--wash); box-shadow: inset 0 2px 0 var(--night), inset 0 -2px 0 var(--night); }
 select.poll-add { width: auto; max-width: 280px; height: 44px; }
+/* planning: steps inside tasks, send the list */
+.plan-top { display: grid; }
+.plan-top > .btn { justify-self: end; order: -1; margin-bottom: 12px; }
+.plan-task { border-bottom: 1px solid var(--line); }
+.plan-task > .plan-row { border-bottom: 0; }
+.plan-steps { margin-left: 40px; border-left: 2px solid var(--line); padding-left: 14px; }
+.plan-row.step { padding: 8px 0; border-bottom: 0; }
+.plan-row.step .plan-title { font-size: 15px; }
+.step-toggle { display: inline-flex; align-items: center; gap: 4px; margin: 0 0 10px 40px; padding: 2px 0; border: 0; background: none; color: var(--muted); font-size: 13px; font-weight: 650; cursor: pointer; }
+.step-toggle:hover { color: var(--ink); }
+.plan-add.step-add { margin: 4px 0 12px 40px; }
+@media (max-width: 640px) { .plan-steps, .plan-add.step-add, .step-toggle { margin-left: 16px; } }

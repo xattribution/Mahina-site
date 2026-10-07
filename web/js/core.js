@@ -128,33 +128,42 @@ export async function api(path, opts = {}) {
     init.body = JSON.stringify(opts.body);
     init.headers["Content-Type"] = "application/json";
   }
-  let res;
-  try { res = await fetch(path, init); } catch { throw new ApiError("Can't reach the server. Check your connection.", 0); }
-  const data = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text();
-  if (res.status === 428 && data?.field === "stepup" && !opts._confirmed) {
-    // Payment settings need a fresh confirmation. Ask, then send the same request again.
-    if (await confirmIdentity()) return api(path, { ...opts, _confirmed: true });
-    throw new ApiError("Nothing was changed.", 428);
+  const send = async () => {
+    try { return await fetch(path, init); } catch { throw new ApiError("Can't reach the server. Check your connection.", 0); }
+  };
+  let res = await send();
+  let data = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text();
+  if (res.status === 428 && data?.field === "stepup") {
+    // Protected change: confirm, then send exactly the same request again (same bytes, not a rebuilt body).
+    if (!(await confirmIdentity())) throw new ApiError("Nothing was changed.", 428);
+    res = await send();
+    data = res.headers.get("content-type")?.includes("json") ? await res.json() : await res.text();
   }
   if (!res.ok) throw new ApiError(data?.error || data?.detail || "Something went wrong on our side. Try again.", res.status, data?.field);
   return data;
 }
 // "Confirm it's you": a code emailed to the signed-in admin (or their password before email is set up).
-async function confirmIdentity() {
+let confirming = null;  // one popup at a time; requests that need it meanwhile wait for the same answer
+function confirmIdentity() {
+  if (!confirming) confirming = askIdentity().finally(() => { confirming = null; });
+  return confirming;
+}
+async function askIdentity() {
   let start;
-  try { start = await api("/api/admin/stepup/start", { method: "POST" }); } catch (e) { toast(e.message, "error"); return false; }
+  try { start = await api("/api/admin/stepup/start", { method: "POST", body: {} }); } catch (e) { toast(e.message, "error"); return false; }
   const byEmail = start.method === "email";
   return new Promise((resolve) => {
     let ok = false;
     const inp = byEmail ? input("code", { inputmode: "numeric", autocomplete: "one-time-code", maxlength: 7, required: true })
       : input("password", { type: "password", autocomplete: "current-password", required: true });
     const form = h("form.confirm-id",
-      h("p", byEmail ? `Enter the 6-digit code we just emailed to ${start.to}.`
+      start.what ? h("p.strong", `Changing ${start.what}`) : null,
+      h("p", byEmail ? `Enter the 6-digit code we emailed to ${start.to}.`
         : start.reason === "email" ? "The code email couldn't be sent. Enter your password instead." : "Enter your password to continue."),
       field(byEmail ? "Code" : "Password", inp), h("p.form-error"),
       h("div.row", { style: { justifyContent: "space-between", marginTop: "8px" } },
         byEmail ? h("button.btn.small.ghost", { type: "button", onclick: async () => {
-          try { await api("/api/admin/stepup/start", { method: "POST" }); toast("New code sent"); } catch (e) { toast(e.message, "error"); }
+          try { await api("/api/admin/stepup/start", { method: "POST", body: { resend: true } }); toast("New code sent"); } catch (e) { toast(e.message, "error"); }
         } }, "Send a new code") : h("span"),
         h("button.btn", { type: "submit" }, "Confirm")));
     onSubmit(form, async (v) => {
