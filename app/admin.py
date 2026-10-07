@@ -312,6 +312,8 @@ def event_fields(body):
         "rsvp_enabled": 1 if body.get("rsvp_enabled", True) else 0,
         "capacity": int(cap) if str(cap or "").isdigit() and int(cap) > 0 else None,
         "reminders": json.dumps(reminders),
+        "donate": 1 if body.get("donate") else 0,
+        "donate_note": clean(body.get("donate_note"), 120),
     }
 
 
@@ -916,8 +918,11 @@ def audience(spec):
         for r in db.q("SELECT name, email, token FROM subscribers WHERE active=1"):
             out[r["email"]] = {"name": r["name"], "unsub": r["token"]}
     if kind == "everyone":
+        # People who said no to club news when they signed up are left out, unless they joined the list some other way.
+        declined = {r["e"] for r in db.q("SELECT lower(email) e FROM rsvps WHERE news=0 UNION SELECT lower(email) FROM signups WHERE news=0")}
         for r in db.q("SELECT name, lower(email) email FROM rsvps UNION SELECT name, lower(email) FROM signups"):
-            out.setdefault(r["email"], {"name": r["name"]})
+            if r["email"] not in declined:
+                out.setdefault(r["email"], {"name": r["name"]})
     if kind == "event":
         for email, p in attendee_emails(int(spec.get("event_id") or 0)).items():
             out[email] = {"name": p["name"], "manage": p["token"]}

@@ -213,6 +213,13 @@ ADDED_COLUMNS = [
     ("sheets", "allow_other", "INTEGER DEFAULT 0"),
     ("slots", "choices", "TEXT DEFAULT '[]'"),
     ("signups", "choice_id", "TEXT"),
+    # Per-person email choices made when they sign up: event reminders (on unless unticked), club news (off unless ticked).
+    ("rsvps", "reminders", "INTEGER DEFAULT 1"),
+    ("rsvps", "news", "INTEGER"),
+    ("signups", "reminders", "INTEGER DEFAULT 1"),
+    ("signups", "news", "INTEGER"),
+    ("events", "donate", "INTEGER DEFAULT 0"),
+    ("events", "donate_note", "TEXT DEFAULT ''"),
 ]
 
 

@@ -840,3 +840,19 @@ body.admin-mode .edit-bar { display: none; }
   .choice-by:empty { display: none; }
 }
 .dish .avatar { display: grid; color: #fff; margin: 0; font-size: 11px; font-weight: 800; }
+
+/* ---------- sign-up popup ---------- */
+.popup h2 { margin-bottom: 4px; }
+.popup-sub { color: var(--muted); font-size: 15px; margin: 0 0 20px; }
+.popup .guest-row { justify-content: space-between; align-items: center; }
+.email-prefs { display: grid; gap: 10px; padding: 14px 0 4px; border-top: 1px solid var(--line); margin-top: 4px; }
+.email-prefs .check { font-size: 15px; color: var(--text); align-items: center; }
+.email-prefs .check > span { display: inline-flex; align-items: center; gap: 4px; }
+.popup .field[hidden] { display: none; }
+@media (max-width: 520px) { .modal { padding: 24px 20px; } }
+
+/* ---------- event donations ---------- */
+.ev-give { display: grid; grid-template-columns: minmax(0, 1fr) 112px; gap: 16px; align-items: center; margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--line-2); }
+.ev-give h3 { font-size: 18px; margin-bottom: 4px; }
+.ev-give p { font-size: 14px; color: var(--muted); margin: 0 0 12px; }
+.ev-give-qr { width: 112px; height: 112px; background: #fff; padding: 8px; border-radius: var(--radius-img); }

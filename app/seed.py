@@ -129,6 +129,7 @@ def run():
                     "and grab a shift if you can help set up or clean up.\n\nKeiki games at noon. Bring sunscreen.",
                     ["Potluck", "ʻOhana"], cover=photo("food-spread.jpg", status="cover"), reminders=(48, 3))
     rsvps(potluck, 14, at(-3, 10))
+    db.run("UPDATE events SET donate=1, donate_note=? WHERE id=?", ("Help cover drinks, plates, and the canopy rental.", potluck))
     sh = db.run("INSERT INTO sheets(event_id, title, description, allow_other, created) VALUES (?,?,?,1,?)",
                 (potluck, "Bring a dish", "Tell us what you're bringing so we don't end up with twelve mac salads.", db.now_iso()))
     slots = [("Main dish", 6, 1, 1, "buffet-table.jpg"), ("Side dish", 8, 1, 1, "food-variety.jpg"), ("Dessert", 6, 1, 1, "table-dishes.jpg"),

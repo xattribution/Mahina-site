@@ -328,7 +328,8 @@ function eventForm(ev, allTags) {
     const starts_at = `${v.date}T${v.all_day ? "00:00" : v.start || "00:00"}`;
     const ends_at = v.end && !v.all_day ? `${v.date}T${v.end}` : (v.all_day ? `${v.date}T23:59` : "");
     const body = { ...v, starts_at, ends_at, status: st.status, tag_ids: [...st.tags], cover_photo_id: st.cover_id, reminders: [...st.reminders],
-      rsvp_enabled: $("[name=rsvp_enabled]", panel).checked, capacity: $("[name=capacity]", panel).value };
+      rsvp_enabled: $("[name=rsvp_enabled]", panel).checked, capacity: $("[name=capacity]", panel).value,
+      donate: $("[name=donate]", panel).checked, donate_note: $("[name=donate_note]", panel).value };
     if (ev) {
       await api(`/api/admin/events/${ev.id}`, { method: "PUT", body });
       toast("Saved");
@@ -346,7 +347,12 @@ function eventForm(ev, allTags) {
     h("div.panel-block", h("span.field-label", "RSVPs"),
       sw("rsvp_enabled", "Take RSVPs", e.rsvp_enabled),
       field("Capacity", input("capacity", { type: "number", min: 1, value: e.capacity || "", placeholder: "No limit" }), { optional: true })),
-    h("div.panel-block", h("span.field-label", "Reminder emails", hint("Sent to everyone who RSVPs or signs up.")),
+    h("div.panel-block", h("span.field-label", "Donations", hint(window.SITE?.venmo
+        ? "Shows a Venmo QR code on the event page. Payments open with the event name as the note."
+        : "Add the club's Venmo handle under Settings > Give first.")),
+      sw("donate", "Show a Venmo QR code", e.donate_on),
+      field("Note", input("donate_note", { value: e.donate_note || "", maxlength: 120, placeholder: "Help cover the turkey and sides" }), { optional: true })),
+    h("div.panel-block", h("span.field-label", "Reminder emails", hint("Sent to everyone who RSVPs or signs up, unless they turned reminders off.")),
       REMINDERS.map(([hrs, t]) => h("label.check", h("input", { type: "checkbox", checked: st.reminders.has(hrs), onchange: (x) => x.target.checked ? st.reminders.add(hrs) : st.reminders.delete(hrs) }), t))));
   return h("div.editor", form, panel, h("div.savebar", h("button.btn", { type: "submit", form: "event-form" }, ev ? "Save changes" : "Create event")));
 }
@@ -397,14 +403,20 @@ function sheetCard(s, ev, redraw) {
         h("button.btn.small.ghost", { type: "button", "aria-label": "Delete sign-up", onclick: async () => {
           if (await confirmBox(`Delete “${s.title}” and everyone signed up for it?`)) { await api(`/api/admin/sheets/${s.id}`, { method: "DELETE" }); toast("Sign-up deleted"); reload(); }
         } }, icon("trash", 16)))),
-    h("div.roster", s.slots.map((sl) => h("div",
-      h("div.slot-name", h("span", sl.image ? h("img.slot-thumb", { src: media(sl.image.thumb), alt: "" }) : null, sl.title, sl.starts_at ? h("span.muted", { style: { fontWeight: 500 } }, "  " + timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : null),
-        h("span.muted.small", [sl.unlimited ? plural(sl.taken, "person", "people") : `${sl.taken} of ${sl.capacity}`, sl.servings ? `about ${sl.servings} servings` : ""].filter(Boolean).join(", "))),
-      sl.signups.length ? sl.signups.map((u) => h("div.who", h("span.strong", u.name), h("a", { href: `mailto:${u.email}`, class: "muted" }, u.email),
-        h("span", [u.item, u.servings ? `feeds ${u.servings}` : "", u.qty > 1 ? `×${u.qty}` : ""].filter(Boolean).join(", ")),
-        h("button.icon-btn", { type: "button", "aria-label": `Remove ${u.name}`, onclick: async () => {
-          if (await confirmBox(`Remove ${u.name} from ${sl.title}?`, { ok: "Remove" })) { await api(`/api/admin/signups/${u.id}`, { method: "DELETE" }); reload(); }
-        } }, icon("close", 16)))) : h("div.who", h("span.muted", "No one yet"))))));
+    h("div.roster",
+      h("div.who.who-head", h("span", "Name"), h("span", "Email"), h("span", "Bringing"), h("span.num", "Qty"), h("span.num", "Feeds"), h("span")),
+      s.slots.map((sl) => h("div",
+        h("div.slot-name", h("span", sl.image ? h("img.slot-thumb", { src: media(sl.image.thumb), alt: "" }) : null, sl.title, sl.starts_at ? h("span.muted", { style: { fontWeight: 500 } }, "  " + timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : null),
+          h("span.muted.small", [sl.unlimited ? plural(sl.taken, "person", "people") : `${sl.taken} of ${sl.capacity}`, sl.servings ? `about ${sl.servings} servings` : ""].filter(Boolean).join(", "))),
+        sl.signups.length ? sl.signups.map((u) => h("div.who",
+          h("span.strong", u.name),
+          h("a", { href: `mailto:${u.email}`, class: "muted" }, u.email),
+          h("span", u.item || h("span.muted", "–")),
+          h("span.num.qty", { title: `${u.name} is bringing ${u.qty}` }, `×${u.qty}`),
+          h("span.num", u.servings || h("span.muted", "–")),
+          h("button.icon-btn", { type: "button", "aria-label": `Remove ${u.name}`, onclick: async () => {
+            if (await confirmBox(`Remove ${u.name} from ${sl.title}?`, { ok: "Remove" })) { await api(`/api/admin/signups/${u.id}`, { method: "DELETE" }); reload(); }
+          } }, icon("close", 16)))) : h("div.who.none", h("span.muted", "No one yet"))))));
 }
 
 function openSheetEditor(ev, sheet, template, onSaved) {

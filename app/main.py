@@ -167,6 +167,9 @@ def get_event(slug):
 def event(slug: str):
     ev = get_event(slug)
     out = store.event_detail(ev)
+    if out.get("donate"):
+        handle = (db.get_setting("venmo") or "").lstrip("@")
+        out["venmo"] = {"handle": handle, "link": venmo_pay_link(handle, ev["title"])}
     photos = db.q("SELECT * FROM photos WHERE event_id=? AND status='approved' ORDER BY id DESC LIMIT 12", (ev["id"],))
     out["gallery"] = [store.photo_out(p) for p in photos]
     return out
@@ -420,6 +423,32 @@ def me_remove(tok: str, request: Request):
     from .admin import audit
     audit(None, "A person removed themselves with their sign-up link", ip="")
     return {"ok": True}
+
+
+def venmo_pay_link(handle, note=""):
+    """Opens Venmo with the club as the recipient and, for an event, the event name as the note."""
+    from urllib.parse import quote
+    if not note:
+        return f"https://venmo.com/u/{handle}"
+    return f"https://venmo.com/?txn=pay&recipients={quote(handle)}&note={quote(note[:100])}"
+
+
+def qr_svg(data):
+    qr = segno.make(data, error="m")
+    buf = io.BytesIO()
+    qr.save(buf, kind="svg", scale=8, border=0, dark="#0F2340", light=None, xmldecl=False)
+    size = qr.symbol_size(scale=8, border=0)[0]
+    svg = buf.getvalue().decode().replace("<svg ", f'<svg viewBox="0 0 {size} {size}" ', 1)
+    return Response(svg, media_type="image/svg+xml", headers={"Cache-Control": "max-age=300"})
+
+
+@app.get("/api/events/{slug}/give.svg")
+def event_give_qr(slug: str):
+    ev = get_event(slug)
+    handle = (db.get_setting("venmo") or "").lstrip("@")
+    if not handle or not ev.get("donate"):
+        raise HTTPException(404)
+    return qr_svg(venmo_pay_link(handle, ev["title"]))
 
 
 @app.get("/api/donate/qr.svg")

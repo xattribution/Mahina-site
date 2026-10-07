@@ -229,12 +229,12 @@ def due_reminders():
                 continue
             people = {}
             cutoff = (start - timedelta(hours=int(hours))).isoformat()
-            for r in db.q("SELECT name, email, token FROM rsvps WHERE event_id=? AND status='going' AND created < ?",
-                          (ev["id"], cutoff)):
+            for r in db.q("SELECT name, email, token FROM rsvps WHERE event_id=? AND status='going' AND created < ? "
+                          "AND COALESCE(reminders, 1)=1", (ev["id"], cutoff)):
                 people.setdefault(r["email"].lower(), {"name": r["name"], "token": r["token"], "items": []})
             for s in db.q("""SELECT sg.name, sg.email, sg.token, sl.title slot, sg.item FROM signups sg
                              JOIN slots sl ON sl.id=sg.slot_id JOIN sheets sh ON sh.id=sl.sheet_id
-                             WHERE sh.event_id=? AND sg.created < ?""", (ev["id"], cutoff)):
+                             WHERE sh.event_id=? AND sg.created < ? AND COALESCE(sg.reminders, 1)=1""", (ev["id"], cutoff)):
                 p = people.setdefault(s["email"].lower(), {"name": s["name"], "token": s["token"], "items": []})
                 p["items"].append(s["slot"] + (f" ({s['item']})" if s["item"] else ""))
             for email, p in people.items():

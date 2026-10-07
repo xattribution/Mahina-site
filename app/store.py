@@ -116,6 +116,7 @@ def events_out(rows, admin=False):
             WHERE h2.event_id=sh.event_id AND h2.status='open' AND s2.capacity > 0) filled
            FROM sheets sh JOIN slots sl ON sl.sheet_id=sh.id WHERE sh.event_id IS NOT NULL AND sh.status='open' AND sl.capacity > 0
            GROUP BY sh.event_id""")}
+    venmo = db.get_setting("venmo")
     out = []
     for r in rows:
         e = {k: r[k] for k in ("id", "slug", "title", "starts_at", "ends_at", "location", "map_url", "summary",
@@ -128,11 +129,15 @@ def events_out(rows, admin=False):
         e["photos"] = photo_counts.get(r["id"], 0)
         sc = sheet_counts.get(r["id"])
         e["signup"] = {"slots": sc["slots"], "open": max(0, sc["cap"] - sc["filled"])} if sc else None
+        e["donate"] = bool(r.get("donate")) and bool(venmo)
+        e["donate_note"] = r.get("donate_note") or "" if e["donate"] else ""
         if admin:
             e["description"] = r["description"]
             e["cover_photo_id"] = r["cover_photo_id"]
             e["reminders"] = json.loads(r.get("reminders") or "[]")
             e["tag_ids"] = [t["id"] for t in e["tags"]]
+            e["donate_on"] = bool(r.get("donate"))
+            e["donate_note"] = r.get("donate_note") or ""
         out.append(e)
     return out
 
@@ -304,9 +309,10 @@ def signup(slot_id, body):
             got = c.execute("SELECT COALESCE(SUM(qty),0) FROM signups WHERE slot_id=? AND choice_id=?", (slot_id, choice["id"])).fetchone()[0]
             if got >= choice["need"]:
                 raise Invalid(f"Someone just took {choice['title']}. Pick another.", "choice")
-        sid = c.execute("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, choice_id, token, created) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?)", (slot_id, name, email, clean(body.get("phone"), 30), qty, item, servings,
-                                                          choice["id"] if choice else None, tok, db.now_iso())).lastrowid
+        reminders, news = email_prefs(body)
+        sid = c.execute("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, choice_id, reminders, news, token, created) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (slot_id, name, email, clean(body.get("phone"), 30), qty, item, servings,
+                                                              choice["id"] if choice else None, reminders, news, tok, db.now_iso())).lastrowid
         c.commit()
     except Exception:
         c.rollback()
@@ -319,7 +325,18 @@ def signup(slot_id, body):
     if ev:
         rows += [("Event", ev["title"]), ("When", mailer.fmt_when(ev)), ("Where", ev["location"])]
     confirm_email(email, name, tok, f"You're signed up: {slot['title']}", rows, ev)
+    if news:
+        subscribe(email, name, "sign-up")
     return {"id": sid}
+
+
+def email_prefs(body):
+    """Reminders default on (older clients don't send the field). Club news is opt-in only."""
+    reminders = 0 if body.get("reminders") in (False, 0, "0", "false", "off") else 1
+    if "news" not in body:
+        return reminders, None  # older form: no answer either way
+    news = 1 if body.get("news") in (True, 1, "1", "true", "on") else 0
+    return reminders, news
 
 
 def fmt_slot_time(slot):
@@ -350,11 +367,14 @@ def rsvp(ev, body):
         confirm_email(email, existing["name"], existing["token"], f"You're going to {ev['title']}", rows, ev)
         return {"status": "going", "already": True, "going": going_count(ev["id"])}
     tok = existing["token"] if existing else my_token(email)
+    reminders, news = email_prefs(body)
     if existing:
-        db.run("UPDATE rsvps SET status=?, guests=? WHERE id=?", (status, guests, existing["id"]))
+        db.run("UPDATE rsvps SET status=?, guests=?, reminders=?, news=? WHERE id=?", (status, guests, reminders, news, existing["id"]))
     else:
-        db.run("INSERT INTO rsvps(event_id, name, email, guests, status, token, created) VALUES (?,?,?,?,?,?,?)",
-               (ev["id"], name, email, guests, status, tok, db.now_iso()))
+        db.run("INSERT INTO rsvps(event_id, name, email, guests, status, reminders, news, token, created) VALUES (?,?,?,?,?,?,?,?,?)",
+               (ev["id"], name, email, guests, status, reminders, news, tok, db.now_iso()))
+    if news:
+        subscribe(email, name, "rsvp")
     if status == "going":
         rows = [("When", mailer.fmt_when(ev)), ("Where", ev["location"]),
                 ("Guests", f"You + {guests}" if guests else "")]

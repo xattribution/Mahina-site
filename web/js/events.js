@@ -1,7 +1,7 @@
 // Events: timeline, calendar, event page, sign-up sheets.
 import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
   clubNow, isoLocal, relDays, anchor, googleCal, me, toast, field, input, onSubmit, honeypot, tagChip, empty, plural, query,
-  setTitle, media, CFG } from "./core.js";
+  setTitle, media, CFG, modal } from "./core.js";
 import { fullMoons, moonSVG, moonInfo } from "./moon.js";
 import { EDIT, ed, tool, action, ask, patchEvent, pickImage, rebuild } from "./edit.js";
 
@@ -428,6 +428,45 @@ function pastPanel(ev, past) {
       window.SITE.public_uploads && past ? h("button.btn.ghost", { type: "button", onclick: () => import("./pages.js").then((P) => P.shareDialog(ev)) }, "Share yours") : null));
 }
 
+// ---------- sign-up popup ----------
+// One popup for RSVPs and sign-ups: who you are, the details for this slot, and two email choices.
+// Reminders start ticked. Club news starts unticked, so no one lands on the list by accident.
+export function signupPopup({ title, sub, fields = [], submit = "Sign up", onSubmit: send, done }) {
+  const known = me.get();
+  const form = h("form.popup-form",
+    field("Name", input("name", { autocomplete: "name", value: known.name || "", required: true })),
+    field("Email", input("email", { type: "email", autocomplete: "email", value: known.email || "", required: true })),
+    ...fields,
+    h("div.email-prefs",
+      h("label.check", h("input", { type: "checkbox", name: "reminders", checked: true }),
+        h("span", "Email me reminders for this event", hint("You'll still get your confirmation, and a heads-up if the event is cancelled or moved."))),
+      h("label.check", h("input", { type: "checkbox", name: "news", checked: false }), "Email me about future events and club news")),
+    honeypot(),
+    h("p.form-error"),
+    h("button.btn.block", { type: "submit" }, submit));
+  onSubmit(form, async (v) => {
+    const res = await send(v);
+    me.set({ name: v.name, email: v.email });
+    m.close();
+    done?.(res, v);
+  });
+  const m = modal(h("div.popup", h("h2", title), sub ? h("p.popup-sub", sub) : null, form), { label: title });
+  (form.querySelector("input[name=name]").value ? form.querySelector("input:not([value]), input[value='']") : form.querySelector("input[name=name]"))?.focus();
+  return m;
+}
+
+// Optional Venmo QR on an event, when an admin turns it on and the club has a Venmo handle.
+function giveBlock(ev) {
+  if (!ev.donate || !ev.venmo) return null;
+  const qr = CFG.demo ? (window.MAHINA_DEMO.qr?.() || "") : `/api/events/${ev.slug}/give.svg`;
+  return h("div.ev-give",
+    h("div.ev-give-text",
+      h("h3", "Chip in"),
+      ev.donate_note ? h("p", ev.donate_note) : null,
+      h("a.btn.small.dark", { href: ev.venmo.link, target: "_blank", rel: "noopener" }, `Venmo @${ev.venmo.handle}`)),
+    h("img.ev-give-qr", { src: qr, alt: `Venmo QR code for @${ev.venmo.handle}`, width: 112, height: 112 }));
+}
+
 function rsvpPanel(ev) {
   const box = h("aside.rsvp#rsvp");
   const draw = (done) => {
@@ -442,39 +481,33 @@ function rsvpPanel(ev) {
         h("p.muted", { style: { margin: 0 } }, done.already
           ? "We sent the link to change or cancel to your email again."
           : "Check your email for your confirmation and a link to change or cancel."),
-        h("div.cal-links", calButtons(ev))));
+        h("div.cal-links", calButtons(ev))), giveBlock(ev) || "");
       return;
     }
-    const known = me.get();
-    let guests = 0;
-    const out = h("output", "0");
     const full = ev.capacity && ev.spots_left <= 0;
-    const form = h("form",
-      field("Name", input("name", { autocomplete: "name", value: known.name || "", required: true })),
-      field("Email", input("email", { type: "email", autocomplete: "email", value: known.email || "", required: true })),
-      h("div.row", { style: { justifyContent: "space-between" } },
-        h("span.field-label", "Guests", hint("Family or friends coming with you.")),
-        h("div.stepper",
-          h("button", { type: "button", "aria-label": "Fewer guests", onclick: () => { guests = Math.max(0, guests - 1); out.value = guests; } }, icon("minus", 18)),
-          out,
-          h("button", { type: "button", "aria-label": "More guests", onclick: () => { guests = Math.min(20, guests + 1); out.value = guests; } }, icon("plus", 18)))),
-      h("label.check", h("input", { type: "checkbox", name: "subscribe", checked: !known.email }), "Email me about future events"),
-      honeypot(),
-      h("p.form-error"),
-      h("button.btn.block", { type: "submit", disabled: full }, full ? "Full" : "I'm going"));
-    onSubmit(form, async (v) => {
-      const res = await api(`/api/events/${ev.slug}/rsvp`, { method: "POST", body: { ...v, guests, status: "going" } });
-      me.set({ name: v.name, email: v.email });
-      if (v.subscribe) api("/api/subscribe", { method: "POST", body: { email: v.email, name: v.name, source: "rsvp" } }).catch(() => {});
-      ev.going = res.going;
-      draw(res);
-    });
+    const open = () => {
+      let guests = 0;
+      const out = h("output", "0");
+      signupPopup({
+        title: ev.title, sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`, submit: "I'm going",
+        fields: [h("div.row.guest-row",
+          h("span.field-label", "Guests", hint("Family or friends coming with you.")),
+          h("div.stepper",
+            h("button", { type: "button", "aria-label": "Fewer guests", onclick: () => { guests = Math.max(0, guests - 1); out.value = guests; } }, icon("minus", 18)),
+            out,
+            h("button", { type: "button", "aria-label": "More guests", onclick: () => { guests = Math.min(20, guests + 1); out.value = guests; } }, icon("plus", 18))))],
+        onSubmit: (v) => api(`/api/events/${ev.slug}/rsvp`, { method: "POST", body: { ...v, guests, status: "going" } }),
+        done: (res) => { ev.going = res.going; draw(res); },
+      });
+    };
     box.append(h("h3", "Are you coming?"),
       h("p.going", icon("people", 18), ev.going ? `${ev.going} going` : "Be the first to RSVP",
         ev.capacity ? h("span", ` of ${ev.capacity}`) : null),
-      form);
+      h("button.btn.block", { type: "button", disabled: full, onclick: open }, full ? "Full" : "I'm going"));
   };
   draw(null);
+  const give = giveBlock(ev);
+  if (give) box.append(give);
   return box;
 }
 
@@ -558,56 +591,48 @@ function slotRow(sheet, sl, open, redraw) {
     open && c.left && sl.left > 0 && !EDIT.on ? h("button.btn.small.ghost", { type: "button", onclick: () => toggle(c.id) }, "I'll bring it") : null))) : null;
   const names = (sl.people || []).filter((p) => !p.item && p.name);
   const people = names.length ? h("div.slot-people", names.map((p) => h("span", p.name, p.qty > 1 ? ` ×${p.qty}` : null))) : null;
-  const formHost = h("div.slot-form");
   const choicesGone = sl.choices?.length && !sl.ask_item && !sl.choices.some((c) => c.left);
   const btn = !open ? null : sl.left > 0 && !choicesGone
-    ? h("button.btn.small", { class: sl.is_other ? "ghost" : "", type: "button", "aria-expanded": "false", onclick: () => toggle() }, sl.is_other ? "Add yours" : "Sign up")
+    ? h("button.btn.small", { class: sl.is_other ? "ghost" : "", type: "button", "aria-haspopup": "dialog", onclick: () => toggle() }, sl.is_other ? "Add yours" : "Sign up")
     : h("span.full-label", "Full");
   function toggle(pick) {
-    const isOpen = formHost.childElementCount > 0 && !pick;
-    $$(".slot-form").forEach((f) => clear(f));
-    $$(".slot [aria-expanded=true]").forEach((b) => b.setAttribute("aria-expanded", "false"));
-    if (isOpen) return;
-    btn?.setAttribute?.("aria-expanded", "true");
-    const known = me.get();
     const openChoices = (sl.choices || []).filter((c) => c.left);
     const itemField = sl.ask_item || sl.is_other ? field("What are you bringing?", input("item", { required: true, maxlength: 120, placeholder: sl.is_other ? "Kalua pig" : sl.note || "" })) : null;
-    const choiceField = openChoices.length ? field("What you're bringing", h("select", { name: "choice", onchange: (e) => {
+    const choiceField = openChoices.length ? field("What are you bringing?", h("select", { name: "choice", onchange: (e) => {
       const write = e.target.value === "";
       itemField.hidden = !write; itemField.querySelector("input").required = write;
     } }, openChoices.map((c) => h("option", { value: c.id, selected: c.id === pick }, c.title)),
       sl.ask_item ? h("option", { value: "" }, "Something else") : null)) : null;
-    if (choiceField && itemField) { itemField.hidden = true; itemField.querySelector("input").required = false; }
-    const form = h("form",
-      field("Name", input("name", { autocomplete: "name", value: known.name || "", required: true })),
-      field("Email", input("email", { type: "email", autocomplete: "email", value: known.email || "", required: true })),
-      choiceField,
-      itemField,
-      sl.ask_servings ? field("Feeds about", input("servings", { type: "number", min: 1, max: 500, inputmode: "numeric", required: true, placeholder: "12" }),
-        { hintText: "Roughly how many people your dish will feed. It helps us see if there's enough of everything." }) : null,
-      limited && sl.left > 1 && !openChoices.length ? field("How many", h("select", { name: "qty" }, Array.from({ length: Math.min(sl.left, 10) }, (_, i) => h("option", { value: i + 1 }, i + 1)))) : null,
-      honeypot(),
-      h("button.btn", { type: "submit" }, "Sign up"),
-      h("p.form-error"));
-    onSubmit(form, async (v) => {
-      const ch = (sl.choices || []).find((c) => c.id === v.choice);
-      if (ch) { v.item = ch.title; v.qty = 1; }
-      await api(`/api/slots/${sl.id}/signup`, { method: "POST", body: v });
-      me.set({ name: v.name, email: v.email });
-      if (ch) { ch.taken += 1; ch.left -= 1; }
-      const qty = Number(v.qty || 1), serves = Number(v.servings || 0);
-      sl.taken += qty; if (limited) { sl.left -= qty; sheet.filled += qty; }
-      sl.servings += serves; sheet.servings = (sheet.servings || 0) + serves; sheet.people = (sheet.people || 0) + qty;
-      const parts = v.name.trim().split(/\s+/);
-      const short = sheet.show_names ? parts[0] + (parts.length > 1 ? " " + parts.at(-1)[0] + "." : "") : "";
-      if (ch && short) ch.by.push(short);
-      (sl.people ||= []).push({ name: short, item: v.item || "", qty, servings: serves || null, choice: ch ? ch.id : null });
-      toast(sl.is_other ? "Thanks! You're on the list." : `You're signed up for ${sl.title}`);
-      redraw();
+    if (choiceField && itemField) { itemField.hidden = true; itemField.querySelector("input").required = false; itemField.querySelector(".field-label").firstChild.textContent = "What is it?"; }
+    const fields = [choiceField, itemField,
+      sl.ask_servings ? field("How many people will it feed?", input("servings", { type: "number", min: 1, max: 500, inputmode: "numeric", required: true, placeholder: "12" }),
+        { hintText: "A rough guess is fine. It helps us see if there's enough of everything." }) : null,
+      limited && sl.left > 1 && !openChoices.length ? field("How many?", h("select", { name: "qty" }, Array.from({ length: Math.min(sl.left, 10) }, (_, i) => h("option", { value: i + 1 }, i + 1))),
+        { hintText: "How many of this you're bringing or covering." }) : null].filter(Boolean);
+    const when = sl.starts_at ? timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at }) : "";
+    signupPopup({
+      title: sl.is_other ? "Bring something else" : sl.title,
+      sub: [sheet.event?.title || sheet.title, when].filter(Boolean).join(", "),
+      fields,
+      onSubmit: async (v) => {
+        const ch = (sl.choices || []).find((c) => c.id === v.choice);
+        if (ch) { v.item = ch.title; v.qty = 1; }
+        await api(`/api/slots/${sl.id}/signup`, { method: "POST", body: v });
+        return ch;
+      },
+      done: (ch, v) => {
+        if (ch) { ch.taken += 1; ch.left -= 1; }
+        const qty = Number(v.qty || 1), serves = Number(v.servings || 0);
+        sl.taken += qty; if (limited) { sl.left -= qty; sheet.filled += qty; }
+        sl.servings += serves; sheet.servings = (sheet.servings || 0) + serves; sheet.people = (sheet.people || 0) + qty;
+        const parts = v.name.trim().split(/\s+/);
+        const short = sheet.show_names ? parts[0] + (parts.length > 1 ? " " + parts.at(-1)[0] + "." : "") : "";
+        if (ch && short) ch.by.push(short);
+        (sl.people ||= []).push({ name: short, item: v.item || "", qty, servings: serves || null, choice: ch ? ch.id : null });
+        toast(sl.is_other ? "Thanks! You're on the list." : `You're signed up for ${sl.title}`);
+        redraw();
+      },
     });
-    formHost.append(form);
-    form.querySelector("input:not([value]), input[value='']")?.focus();
-    if (pick) formHost.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
   const slotPatch = (body) => api(`/api/admin/slots/${sl.id}`, { method: "PATCH", body });
   const editTools = EDIT.on ? h("span.ed-tools",
@@ -639,7 +664,7 @@ function slotRow(sheet, sl, open, redraw) {
       h("div.slot-title", title, sl.starts_at ? h("small", timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : sl.note && !sl.ask_item ? h("small", sl.note) : null),
       h("div.slot-fill", pips, count ? h("div.slot-count", count) : null, people),
       EDIT.on ? editTools : btn),
-    ...[choiceList, dishes, formHost].filter(Boolean));
+    ...[choiceList, dishes].filter(Boolean));
   return row;
 }
 

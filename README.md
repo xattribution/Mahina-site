@@ -11,11 +11,11 @@ Website and admin console for the Mahina Club, the Space Forces–Indo-Pacific b
 | Sign-ups | SignUpGenius-style slots: potluck dishes with a public list of what everyone is bringing and how many it feeds, a "Something else" write-in, timed volunteer shifts, quantities | Templates (potluck, shifts, blank), optional specific items per slot that people claim (Turkey, Ham), slot pictures, no-limit slots, servings totals against the RSVP count, reorder slots, remove people, CSV |
 | Gallery | Masonry, lightbox, filter by tag or event; tag filters surface related events; visitors can share photos | Bulk upload, review queue, bulk tag/hide/delete, captions |
 | Polls | Forms-style questions: multiple choice, checkboxes, 1–5 rating, written | Builder, open/close dates, result visibility, one response per email, CSV |
-| Give | Venmo handle, QR code, goal progress, where the money goes | Edit handle, goal, amount raised |
+| Give | Venmo handle, QR code, goal progress, where the money goes; optional Venmo QR on any event | Edit handle, goal, amount raised; turn on the QR per event with a note |
 | Planning | | Per-event tasks and volunteer jobs assigned to team members, a shopping list with costs and who bought what, and team notes. Never public |
 | Contact | Message form, officers, club email | Inbox with read/archive |
 | My sign-ups | Every confirmation email links to a page where people change or cancel, or remove themselves completely | |
-| Email | Confirmations with calendar files, reminders, invites, announcements, unsubscribe and remove-me links | Composer (mailing list, everyone, event attendees, specific people), outbox |
+| Email | Confirmations with calendar files, reminders (people can turn them off per event), club news only for people who tick the box, invites, announcements, unsubscribe and remove-me links | Composer (mailing list, everyone, event attendees, specific people), outbox |
 | Accounts | One sign-in at `/login` for admins and members | Admin and member accounts, per-area access for members, and an activity log of who did what |
 
 ## Install
