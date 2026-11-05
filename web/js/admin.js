@@ -260,12 +260,13 @@ async function eventEditor(id) {
   const tab = query().get("tab") || "details";
   if (isNew) return h("div", head("New event", { back: ["/events", "Events"] }), eventForm(null, tags));
   const tabs = [["details", "Details"], ["signups", "Sign-ups", ev.sheets.length], ["rsvps", "RSVPs", ev.rsvps.filter((r) => r.status === "going").length],
+    ev.sheets.length || ev.rsvps.length ? ["people", "Who's coming", headcount(ev.people).total] : null,
     ["planning", "Planning"], can("polls") ? ["polls", "Polls", ev.polls.length] : null, can("email") ? ["invite", "Invite"] : null].filter(Boolean);
   const body = h("div");
   const setTab = (t) => {
     replaceUrl(`/team/events/${id}?tab=${t}`);
     $$(".tabs button").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.t === t)));
-    clear(body).append(t === "signups" ? eventSheets(ev) : t === "rsvps" ? rsvpTab(ev) : t === "invite" ? inviteTab(ev) : t === "planning" ? planBoard(ev.id) : t === "polls" ? eventPolls(ev) : eventForm(ev, tags));
+    clear(body).append(t === "signups" ? eventSheets(ev) : t === "rsvps" ? rsvpTab(ev) : t === "people" ? peopleTab(ev) : t === "invite" ? inviteTab(ev) : t === "planning" ? planBoard(ev.id) : t === "polls" ? eventPolls(ev) : eventForm(ev, tags));
   };
   const page = h("div",
     head(ev.title, { back: ["/events", "Events"], sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`,
@@ -635,6 +636,50 @@ function rsvpTab(ev) {
       : empty("No RSVPs yet.", aLink(`/events/${ev.id}?tab=invite`, { class: "btn dark", onclick: () => setTimeout(() => $$(".tabs button").find((b) => b.dataset.t === "invite")?.click(), 0) }, "Send an invite")));
   draw();
   return wrap;
+}
+
+function headcount(people) {
+  const going = people.filter((p) => p.rsvp?.status === "going");
+  const rsvp = going.reduce((a, p) => a + 1 + p.rsvp.guests, 0);
+  const extra = people.filter((p) => p.group === "signup").length;
+  return { total: rsvp + extra, rsvp, extra, maybe: people.filter((p) => p.rsvp?.status === "maybe").length };
+}
+
+const PEOPLE_GROUPS = [["all", "Everyone"], ["both", "RSVP'd and signed up"], ["rsvp", "RSVP'd only"], ["signup", "Signed up only"], ["no", "Not going"]];
+
+function peopleTab(ev) {
+  const people = ev.people;
+  const n = headcount(people);
+  const count = (g) => g === "all" ? people.length : people.filter((p) => p.group === g).length;
+  let show = "all";
+  const table = h("div");
+  const status = (p) => !p.rsvp ? h("span.sub", "No RSVP")
+    : h("span", pill(p.rsvp.status === "going" ? "yes" : p.rsvp.status === "no" ? "closed" : "pending",
+      p.rsvp.status === "no" ? "Not going" : p.rsvp.status === "going" ? "Going" : "Maybe"),
+      p.rsvp.guests ? h("span.sub", ` +${p.rsvp.guests}`) : null);
+  const signed = (p) => p.signups.length ? h("ul.plain", p.signups.map((u) =>
+    h("li", u.item ? h("span", h("b", u.item), h("span.sub", ` · ${u.slot}`)) : u.slot, u.qty > 1 ? h("span.sub", ` ×${u.qty}`) : null)))
+    : h("span.sub", "Nothing");
+  const who = (p) => h("td",
+    h("div.strong", p.name, p.match === "name" ? hint(`Matched by name. Used ${p.emails.join(" and ")}.`) : null),
+    h("div.sub", p.emails[0]));
+  const draw = () => {
+    const rows = show === "all" ? people : people.filter((p) => p.group === show);
+    clear(table).append(rows.length ? h("div.tbl-wrap", h("table.tbl",
+      h("thead", h("tr", h("th", "Name"), h("th", "RSVP"), h("th", "Signed up for"))),
+      h("tbody", rows.map((p) => h("tr", { class: p.group === "no" && p.signups.length ? "warn-row" : "" }, who(p), h("td", status(p)), h("td", signed(p)))))))
+      : empty("No one here."));
+  };
+  const seg = h("div.seg.people-seg", PEOPLE_GROUPS.map(([g, t]) => h("button", { type: "button", "aria-pressed": String(g === show),
+    onclick: (e) => { show = g; $$("button", seg).forEach((b) => b.setAttribute("aria-pressed", String(b === e.currentTarget))); draw(); } }, t, h("span.n", count(g)))));
+  draw();
+  return h("div",
+    h("div.stats",
+      h("div.stat", h("b", n.total), h("span", "Expected ", hint("People who RSVP'd going plus their guests, and people who signed up without an RSVP. Maybes aren't counted."))),
+      h("div.stat", h("b", n.rsvp), h("span", "From RSVPs")),
+      h("div.stat", h("b", n.extra), h("span", "Signed up, no RSVP")),
+      h("div.stat", h("b", n.maybe), h("span", "Maybe"))),
+    seg, table);
 }
 
 function inviteTab(ev) {

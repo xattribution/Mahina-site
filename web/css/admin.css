@@ -499,3 +499,10 @@ select.poll-add { width: auto; max-width: 280px; height: 44px; }
 .step-toggle:hover { color: var(--ink); }
 .plan-add.step-add { margin: 4px 0 12px 40px; }
 @media (max-width: 640px) { .plan-steps, .plan-add.step-add, .step-toggle { margin-left: 16px; } }
+
+/* who's coming */
+.people-seg { display: flex; width: max-content; max-width: 100%; overflow-x: auto; scrollbar-width: none; margin: 24px 0 16px; }
+.people-seg button { flex: none; }
+.seg .n { font-variant-numeric: tabular-nums; opacity: .75; }
+ul.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+tr.warn-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); padding-left: 12px; }

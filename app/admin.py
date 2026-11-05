@@ -356,7 +356,71 @@ def event(eid: int, a=can("events")):
     out = store.event_detail(ev, admin=True)
     out["rsvps"] = db.q("SELECT id, name, email, guests, status, created FROM rsvps WHERE event_id=? ORDER BY status, created",
                         (eid,))
+    out["people"] = event_people(eid)
     return out
+
+
+def _email_key(e):
+    local, _, dom = (e or "").strip().lower().partition("@")
+    local = local.split("+", 1)[0]
+    if dom in ("gmail.com", "googlemail.com"):
+        local, dom = local.replace(".", ""), "gmail.com"
+    return f"{local}@{dom}"
+
+
+def _name_key(n):
+    import unicodedata
+    n = unicodedata.normalize("NFKD", n or "").encode("ascii", "ignore").decode().lower()
+    return " ".join(re.sub(r"[^a-z0-9 ]", " ", n).split())
+
+
+def event_people(eid):
+    """One row per person across the event's RSVPs and sign-ups. Read only.
+    Same email (ignoring case, +tags, and Gmail dots) is the same person. Otherwise a full name that appears exactly
+    once on each side is matched too, and marked so planners can see it was matched by name."""
+    people = {}
+    for r in db.q("SELECT name, email, guests, status FROM rsvps WHERE event_id=? ORDER BY created", (eid,)):
+        p = people.setdefault(_email_key(r["email"]), {"name": r["name"], "emails": [], "rsvp": None, "signups": [], "match": None})
+        p["emails"].append(r["email"])
+        p["rsvp"] = {"status": r["status"], "guests": r["guests"] or 0}
+    for u in db.q("""SELECT u.name, u.email, u.item, u.qty, sl.title slot, sh.title sheet FROM signups u
+                     JOIN slots sl ON sl.id=u.slot_id JOIN sheets sh ON sh.id=sl.sheet_id
+                     WHERE sh.event_id=? ORDER BY sh.sort, sl.sort, u.created""", (eid,)):
+        k = _email_key(u["email"])
+        p = people.setdefault(k, {"name": u["name"], "emails": [], "rsvp": None, "signups": [], "match": None})
+        if u["email"].lower() not in (e.lower() for e in p["emails"]):
+            p["emails"].append(u["email"])
+        p["signups"].append({"slot": u["slot"], "sheet": u["sheet"], "item": u["item"] or "", "qty": u["qty"] or 1})
+    # Name matching between people who are only on one list.
+    only_r = [k for k, p in people.items() if p["rsvp"] and not p["signups"]]
+    only_s = [k for k, p in people.items() if p["signups"] and not p["rsvp"]]
+    def by_name(keys):
+        out = {}
+        for k in keys:
+            n = _name_key(people[k]["name"])
+            if len(n.split()) >= 2:
+                out.setdefault(n, []).append(k)
+        return out
+    rn, sn = by_name(only_r), by_name(only_s)
+    for n, rk in rn.items():
+        if len(rk) == 1 and len(sn.get(n, [])) == 1:
+            r, s_ = people[rk[0]], people.pop(sn[n][0])
+            r["signups"], r["match"] = s_["signups"], "name"
+            r["emails"] += [e for e in s_["emails"] if e.lower() not in (x.lower() for x in r["emails"])]
+    rows = []
+    for p in people.values():
+        st = p["rsvp"]["status"] if p["rsvp"] else None
+        if st == "no":
+            group = "no"
+        elif st and p["signups"]:
+            group = "both"
+        elif st:
+            group = "rsvp"
+        else:
+            group = "signup"
+        rows.append({**p, "group": group})
+    rows.sort(key=lambda p: _name_key(p["name"]))
+    return rows
 
 
 @router.post("/events")
