@@ -11,7 +11,13 @@
 REPO="${MAHINA_REPO:-xattribution/mahina-site}"
 BRANCH="${MAHINA_BRANCH:-main}"
 REPO_URL="${MAHINA_REPO_URL:-https://github.com/${REPO}.git}"
-DIR="${MAHINA_DIR:-/opt/mahina-club}"
+# Where the site lives: MAHINA_DIR if set, else the folder this script sits in when that's a copy of the site
+# (so `mahina` works for a hand-made clone like ~/mahina-site), else /opt/mahina-club for a fresh install.
+SELF="$(readlink -f "${BASH_SOURCE[0]:-}" 2>/dev/null || true)"
+HERE="${SELF%/*}"
+if [ -n "${MAHINA_DIR:-}" ]; then DIR="$MAHINA_DIR"
+elif [ -n "$SELF" ] && [ -f "$HERE/docker-compose.yml" ] && [ -d "$HERE/.git" ]; then DIR="$HERE"
+else DIR=/opt/mahina-club; fi
 BIN="${MAHINA_BIN:-/usr/local/bin/mahina}"
 KEEP_BACKUPS="${MAHINA_KEEP_BACKUPS:-10}"
 APP_UID=10001
@@ -50,6 +56,13 @@ need_root() { [ "$(id -u)" -eq 0 ] || die "Run this with sudo."; }
 installed() { [ -f "$DIR/docker-compose.yml" ] && [ -d "$DIR/.git" ]; }
 need_installed() { installed || die "The Mahina Club isn't installed in $DIR."; }
 compose() { (cd "$DIR" && docker compose --progress quiet "$@"); }
+# Git runs as whoever owns the folder, so a copy in someone's home folder stays theirs and `git pull` keeps working.
+git() {
+  local owner; owner="$(stat -c %U "$DIR" 2>/dev/null || echo root)"
+  if [ "$owner" != root ] && [ "$(id -u)" -eq 0 ] && [ -d "$DIR/.git" ]; then
+    (cd "$DIR" && sudo -u "$owner" git "$@")
+  else command git "$@"; fi
+}
 env_get() { [ -f "$DIR/.env" ] && sed -n "s/^$1=//p" "$DIR/.env" | tail -n1 || true; }
 
 pkg_install() {
@@ -127,14 +140,15 @@ set_env() { # set_env KEY VALUE  (adds or replaces a line in .env)
   cat "$tmp" >"$f"; rm -f "$tmp"
 }
 
-merge_new_settings() { # add settings that newer versions introduced, keeping the user's values
+merge_new_settings() { # list settings that newer versions introduced, commented out so nothing changes on its own
   local line k added=0
+  touch "$DIR/.env"
   while IFS= read -r line; do
     [[ "$line" =~ ^([A-Z_][A-Z0-9_]*)= ]] || continue
     k="${BASH_REMATCH[1]}"
-    if ! grep -q "^$k=" "$DIR/.env"; then printf '%s\n' "$line" >>"$DIR/.env"; added=$((added + 1)); fi
+    if ! grep -Eq "^#? ?$k=" "$DIR/.env"; then printf '# %s\n' "$line" >>"$DIR/.env"; added=$((added + 1)); fi
   done <"$DIR/.env.example"
-  [ "$added" -gt 0 ] && ok "Added $added new setting(s) to .env"
+  [ "$added" -gt 0 ] && ok "Listed $added new setting(s) in .env (commented out)"
   return 0
 }
 
@@ -180,7 +194,7 @@ cmd_install() {
   step "Building and starting (the first build takes a few minutes)"
   compose up -d --build --quiet-pull >/dev/null
   install_cli
-  if wait_healthy; then ok "The site is running."; else warn "The site didn't answer yet. Check with: sudo mahina logs"; fi
+  if wait_healthy; then git -C "$DIR" rev-parse HEAD >"$DIR/.built"; ok "The site is running."; else warn "The site didn't answer yet. Check with: sudo mahina logs"; fi
   local url; url="$(env_get SITE_URL)"
   say ""
   say "${B}Open ${url}/login${N} to create the first admin account."
@@ -203,14 +217,17 @@ cmd_update() {
   step "Downloading the latest version"
   git fetch -q --depth 1 origin "$BRANCH" || die "Couldn't reach $(git remote get-url origin)."
   new="$(git rev-parse FETCH_HEAD)"
-  if [ "$old" = "$new" ] && [ -z "${MAHINA_FORCE:-}" ]; then ok "Already up to date ($(git log -1 --format=%cs "$old"))."; return; fi
+  # .built is the version that was last built and started, so a `git pull` done by hand still gets rebuilt here.
+  if [ "$old" = "$new" ] && [ "$(cat "$DIR/.built" 2>/dev/null)" = "$new" ] && [ -z "${MAHINA_FORCE:-}" ]; then ok "Already up to date ($(git log -1 --format=%cs "$old"))."; return; fi
   git reset -q --hard "$new"   # your data/, backups/ and .env are not tracked by git, so they stay as they are
   merge_new_settings
   chown -R "$APP_UID:$APP_UID" "$DIR/data"
+  install_cli
   step "Rebuilding and restarting"
   compose up -d --build --remove-orphans --quiet-pull >/dev/null
   if wait_healthy; then
     docker image prune -f >/dev/null 2>&1 || true
+    printf '%s\n' "$new" >"$DIR/.built"
     ok "Updated to $(git log -1 --format='%h from %cs')."
   else
     warn "The new version didn't start. Going back to the previous one."

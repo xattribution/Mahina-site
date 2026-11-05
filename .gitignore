@@ -3,3 +3,4 @@ backups/
 .env
 __pycache__/
 *.pyc
+.built

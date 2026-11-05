@@ -39,9 +39,10 @@ It installs Docker if needed and asks three questions: the port, the public addr
 | Status, logs, restart | `sudo mahina status`, `sudo mahina logs`, `sudo mahina restart` |
 
 - **After an update**, a normal page refresh loads the new version. Script and style addresses change with every release, so browsers and proxies can't hold on to old copies.
-- **Update** never touches your data: the mailing list, sign-ups, email settings, and accounts carry over. It backs up your data first, downloads the latest version, and restarts. If the new version fails to start, it goes back to the previous one on its own. The last 10 backups are kept in `/opt/mahina-club/backups`.
+- **Update** never touches your data: the mailing list, sign-ups, email settings, and accounts carry over. It backs up your data first, downloads the latest version, and restarts. If the new version fails to start, it goes back to the previous one on its own. The last 10 backups are kept in the `backups` folder inside the site folder (`/opt/mahina-club` for the one-line install).
 - **Uninstall** asks you to type `uninstall`, saves a final backup to your home folder, and removes the site. Docker stays installed. Add `--purge` to skip the backup, or `--yes` to skip the question.
-- **Settings** are in `/opt/mahina-club/.env`. Run `sudo mahina restart` after changing them. New settings from updates are added automatically, and your values are kept.
+- **Settings** are in `.env` in the site folder. Run `sudo mahina restart` after changing them. Updates list any new settings at the end of `.env`, commented out, and never change your values.
+- **Cloned the repo yourself?** Run `sudo ln -sf ~/your-folder/install.sh /usr/local/bin/mahina` once, and the `mahina` commands work on that folder.
 
 The site runs as an unprivileged user inside its container. Put it behind your reverse proxy (Nginx Proxy Manager works) with HTTPS. Sign-in cookies are marked secure automatically when the proxy sends `X-Forwarded-Proto: https`.
 
