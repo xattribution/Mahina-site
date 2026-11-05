@@ -57,11 +57,12 @@ installed() { [ -f "$DIR/docker-compose.yml" ] && [ -d "$DIR/.git" ]; }
 need_installed() { installed || die "The Mahina Club isn't installed in $DIR."; }
 compose() { (cd "$DIR" && docker compose --progress quiet "$@"); }
 # Git runs as whoever owns the folder, so a copy in someone's home folder stays theirs and `git pull` keeps working.
+# safe.directory lets it work whoever owns the folder (for example, one cloned with sudo).
 git() {
   local owner; owner="$(stat -c %U "$DIR" 2>/dev/null || echo root)"
-  if [ "$owner" != root ] && [ "$(id -u)" -eq 0 ] && [ -d "$DIR/.git" ]; then
-    (cd "$DIR" && sudo -u "$owner" git "$@")
-  else command git "$@"; fi
+  if [ "$owner" != root ] && [ "$(id -u)" -eq 0 ] && [ -d "$DIR/.git" ] && id -u "$owner" >/dev/null 2>&1; then
+    (cd "$DIR" && sudo -u "$owner" git -c safe.directory="$DIR" "$@")
+  else command git -c safe.directory="$DIR" "$@"; fi
 }
 env_get() { [ -f "$DIR/.env" ] && sed -n "s/^$1=//p" "$DIR/.env" | tail -n1 || true; }
 
