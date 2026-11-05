@@ -1,5 +1,5 @@
 // Public shop: products, a cart, checkout, and the order page where people pay with Venmo.
-import { h, $, $$, api, clear, go, icon, link, hint, toast, modal, field, input, onSubmit, honeypot, me, setTitle, media, copy, CFG, empty, plural } from "./core.js";
+import { h, $, $$, api, clear, go, icon, link, shareButton, hint, toast, modal, field, input, onSubmit, honeypot, me, setTitle, media, copy, CFG, empty, plural } from "./core.js";
 
 export const money = (c) => "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const label = (it) => it.name + (it.option ? ` (${it.option})` : "");
@@ -33,7 +33,7 @@ export async function shopPage() {
   };
   drawBar();
   return h("div.wrap.shop",
-    h("div.page-head", h("h1.h1", data.title), data.note ? h("p.shop-note", data.note) : null),
+    h("div.page-head", h("div.top-row.title-row", h("h1.h1", data.title), shareButton(data.title, "/shop")), data.note ? h("p.shop-note", data.note) : null),
     data.products.length ? h("div.shop-grid", data.products.map((p) => productCard(p, add))) : empty("Nothing for sale right now."),
     bar);
 }

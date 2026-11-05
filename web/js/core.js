@@ -56,6 +56,7 @@ const ICONS = {
   info: "M10 3.5a6.5 6.5 0 1 1 0 13 6.5 6.5 0 0 1 0-13zM10 9v4.5M10 6.6v.1",
   camera: "M3.5 7h3l1.5-2h4l1.5 2h3v9h-13zM10 13.8a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2z",
   external: "M11 4h5v5M16 4l-7 7M14 12v4H4V6h4",
+  share: "M10 12.5V3M6.5 6.5 10 3l3.5 3.5M7 9.5H4.5v7h11v-7H13",
   menu: "M3.5 6.5h13M3.5 10h13M3.5 13.5h13",
   copy: "M7 7h9v9H7zM4 13V4h9", download: "M10 3.5v9M6 9l4 4 4-4M4 16.5h12",
   trash: "M4.5 6h11M8 6V4h4v2M6 6l.8 10h6.4L14 6", edit: "M4 16l1-4 8-8 3 3-8 8zM11.5 5.5l3 3",
@@ -411,6 +412,32 @@ export function plural(n, one, many = one + "s") { return `${n} ${n === 1 ? one 
 
 export function copy(text) {
   (navigator.clipboard?.writeText(text) || Promise.reject()).then(() => toast("Copied"), () => toast(text));
+}
+
+// ---------- share ----------
+export function shareUrl(path) {
+  return (window.SITE?.site_url || location.origin + BASE) + (path === "/" ? "" : path);
+}
+
+export function openShare(title, path) {
+  const url = shareUrl(path);
+  const q = encodeURIComponent(path);
+  const demo = CFG.demo ? window.MAHINA_DEMO.qr?.() || "" : "";
+  const name = (path.replace(/\/$/, "").split("/").pop() || "mahina-club") + "-qr";
+  modal(h("div.share",
+    h("h2.h3", title),
+    h("div.share-qr", h("img", { src: demo || `/api/share/qr.svg?path=${q}`, alt: `QR code for ${url}`, width: 220, height: 220 })),
+    h("div.share-link",
+      h("input", { type: "text", value: url, readonly: true, "aria-label": "Link", onfocus: (e) => e.target.select() }),
+      h("button.btn.small.dark", { type: "button", onclick: () => copy(url) }, icon("copy", 16), "Copy")),
+    h("div.row",
+      navigator.share ? h("button.btn", { type: "button", onclick: () => navigator.share({ title, url }).catch(() => {}) }, icon("share", 18), "Share") : null,
+      h("a.btn.ghost", { href: demo || `/api/share/qr.png?path=${q}`, download: demo ? name + ".svg" : name + ".png" }, icon("download", 18), "Download QR"))),
+  { label: `Share ${title}` });
+}
+
+export function shareButton(title, path) {
+  return h("button.btn.small.ghost.share-btn", { type: "button", "aria-label": `Share ${title}`, onclick: () => openShare(title, path) }, icon("share", 16), "Share");
 }
 
 export function loading() { return h("div.loading", { "aria-label": "Loading" }, h("span"), h("span"), h("span")); }

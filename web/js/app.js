@@ -1,4 +1,4 @@
-import { h, $, $$, api, clear, go, href, icon, link, loading, onRender, route, fallback, startRouter, render, toast, currentPath, CFG, setTitle, honeypot, onSubmit, formErrors, modal, linkPicker } from "./core.js";
+import { h, $, $$, api, clear, go, href, icon, link, loading, onRender, route, fallback, startRouter, render, toast, currentPath, CFG, setTitle, honeypot, onSubmit, formErrors, modal, linkPicker, openShare } from "./core.js";
 import { moonInfo, moonSVG } from "./moon.js";
 import * as P from "./pages.js";
 import * as E from "./events.js";
@@ -98,7 +98,8 @@ function footer() {
       h("div", wordmark(true), S.org_line || EDIT.on ? ed(h("p.foot-org", S.org_line || ""), { placeholder: "Organization", label: "Organization",
         save: (t) => saveSettings({ org_line: t }) }) : null),
       h("div.foot-links", [...nav(), ["/give", "Give"]].map(([p, t]) => link(p, {}, t)),
-        h("a", { href: feed }, "Calendar feed"), S.email ? h("a", { href: `mailto:${S.email}` }, "Email us") : null),
+        h("a", { href: feed }, "Calendar feed"), S.email ? h("a", { href: `mailto:${S.email}` }, "Email us") : null,
+        h("button.foot-share", { type: "button", onclick: () => openShare(S.club_name || "Mahina Club", "/") }, icon("share", 16), "Share this site")),
       h("div.foot-sub", h("h3", "Get club news"), sub)),
     h("div.foot-legal", ed(h("p", S.disclaimer || ""), { multiline: true, placeholder: "Footer notice", label: "Footer notice",
       save: (t) => saveSettings({ disclaimer: t }) }), link("/login", {}, "Login"))));

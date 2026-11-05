@@ -1,5 +1,5 @@
 // Home, gallery, polls, give, contact, my sign-ups.
-import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
+import { h, $, $$, api, clear, go, href, icon, link, shareButton, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
   clubNow, isoLocal, relDays, me, toast, modal, field, input, onSubmit, honeypot, tagChip, empty, plural, query, copy,
   setTitle, media, CFG, loading, replaceUrl, confirmBox } from "./core.js";
 import { moonInfo, moonSVG, palmSVG } from "./moon.js";
@@ -396,7 +396,7 @@ export async function pollPage({ slug }) {
   setTitle(p.title);
   const page = h("div.wrap.poll-page");
   const patch = (body) => api(`/api/admin/polls/${p.id}`, { method: "PATCH", body });
-  const head = h("div.page-head", link("/polls", { class: "back" }, icon("left", 18), "Polls"),
+  const head = h("div.page-head", h("div.top-row", link("/polls", { class: "back" }, icon("left", 18), "Polls"), shareButton(p.title, `/polls/${p.slug}`)),
     ed(h("h1.h1", p.title), { label: "Poll title", save: (t) => patch({ title: t }) }),
     p.intro || EDIT.on ? ed(h("p.lede", p.intro || ""), { label: "Intro", placeholder: "Intro", save: (t) => patch({ intro: t }) }) : null,
     EDIT.on ? h("p", h("a.ed-action", { href: href(`/admin/polls/${p.id}?tab=build`) }, icon("edit", 16), "Edit questions")) : null,

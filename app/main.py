@@ -224,7 +224,31 @@ def site():
         "shop": {"title": s.get("shop_title") or "Shop"} if s.get("shop_enabled") else None,
         "polls_open": db.one("SELECT COUNT(*) n FROM polls WHERE status='open' AND (closes_at IS NULL OR closes_at > ?)",
                              (db.now_iso(),))["n"],
+        "site_url": configured_site_url(),
     }
+
+
+def configured_site_url():
+    return (os.environ.get("SITE_URL") or db.get_setting("site_url") or "").rstrip("/")
+
+
+SHARE_PATH = re.compile(r"/[A-Za-z0-9/_.~-]{0,200}")
+
+
+@app.get("/api/share/qr.{fmt}")
+def share_qr(fmt: str, request: Request, path: str = "/"):
+    """QR code for a page on this site. Only site paths are accepted, so it can't be used to dress up outside links."""
+    if fmt not in ("svg", "png") or not SHARE_PATH.fullmatch(path) or "//" in path or ".." in path:
+        raise HTTPException(404)
+    throttle(request, "share-qr", 120)
+    url = (configured_site_url() or str(request.base_url).rstrip("/")) + ("" if path == "/" else path)
+    if fmt == "svg":
+        return qr_svg(url)
+    buf = io.BytesIO()
+    segno.make(url, error="m").save(buf, kind="png", scale=16, border=4, dark="#0F2340")
+    name = path.rstrip("/").rsplit("/", 1)[-1] or "mahina-club"
+    return Response(buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "max-age=300", "Content-Disposition": f'attachment; filename="{name}-qr.png"'})
 
 
 # ---------- events ----------

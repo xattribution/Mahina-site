@@ -1,5 +1,5 @@
 // Events: timeline, calendar, event page, sign-up sheets.
-import { h, $, $$, api, clear, go, href, icon, link, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
+import { h, $, $$, api, clear, go, href, icon, link, shareButton, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
   clubNow, isoLocal, relDays, anchor, googleCal, me, toast, field, input, onSubmit, honeypot, tagChip, empty, plural, query,
   setTitle, media, CFG, modal } from "./core.js";
 import { fullMoons, moonSVG, moonInfo } from "./moon.js";
@@ -409,7 +409,7 @@ export async function eventPage({ slug }) {
     heroEl,
     h("div.wrap.ev-head",
       h("div",
-        link("/events", { class: "back" }, icon("left", 18), "Events"),
+        h("div.top-row", link("/events", { class: "back" }, icon("left", 18), "Events"), shareButton(ev.title, `/events/${ev.slug}`)),
         ev.status === "cancelled" ? h("div.ev-status", "Cancelled") : null,
         ed(h("h1.h1", ev.title), { label: "Event title", save: (t) => save({ title: t }).then((r) => { setTitle(r.title); return r.title; }) }),
         h("div.facts",
@@ -692,6 +692,6 @@ export async function sheetPage({ id }) {
   const s = await api(`/api/sheets/${id}`);
   setTitle(s.title);
   if (s.event) { go(`/events/${s.event.slug}#signups`, { replace: true }); return h("div"); }
-  return h("div.wrap", h("div.page-head", link("/events", { class: "back" }, icon("left", 18), "Events"), h("h1.h1", s.title),
+  return h("div.wrap", h("div.page-head", h("div.top-row", link("/events", { class: "back" }, icon("left", 18), "Events"), shareButton(s.title, `/signups/${s.id}`)), h("h1.h1", s.title),
     s.description ? h("p.lede", s.description) : null), sheetView({ ...s, description: "" }));
 }
