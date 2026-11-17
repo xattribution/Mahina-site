@@ -581,19 +581,22 @@ export async function mine({ token }) {
   const list = h("div.mine");
   const rows = [
     ...data.rsvps.filter((r) => r.status !== "no").map((r) => ({ kind: "rsvp", id: r.id, at: r.starts_at, title: r.title, slug: r.slug,
-      sub: `${longDate(parse(r.starts_at))}, ${time(parse(r.starts_at))}` + (r.guests ? `, you + ${r.guests}` : "") + (r.status === "maybe" ? ", maybe" : ""), what: "RSVP" })),
+      sub: `${longDate(parse(r.starts_at))}, ${time(parse(r.starts_at))}` + (r.guests ? `, you + ${r.guests}` : "") + (r.status === "maybe" ? ", maybe" : ""), what: "RSVP", pay: r.pay })),
     ...data.signups.map((s) => ({ kind: "signup", id: s.id, at: s.starts_at || s.slot_start || "", title: `${s.slot}${s.item ? ": " + s.item : ""}`, slug: s.slug,
-      sub: [s.event || s.sheet, s.starts_at ? longDate(parse(s.starts_at)) : null].filter(Boolean).join(", "), what: "Sign-up" })),
+      sub: [s.event || s.sheet, s.starts_at ? longDate(parse(s.starts_at)) : null].filter(Boolean).join(", "), what: "Sign-up", pay: s.pay })),
   ].sort((a, b) => (a.at || "").localeCompare(b.at || ""));
   const draw = () => {
     clear(list);
     if (!rows.length) return list.append(empty("Nothing coming up.", link("/events", { class: "btn dark" }, "Find an event")));
     rows.forEach((r) => list.append(h("div.mine-row",
-      h("div", h("b", r.slug ? link(`/events/${r.slug}`, {}, r.title) : r.title), h("div.muted", r.sub)),
-      h("button.btn.small.ghost", { type: "button", onclick: async () => {
-        await api(`/api/me/${token}/cancel`, { method: "POST", body: { kind: r.kind, id: r.id } });
-        rows.splice(rows.indexOf(r), 1); draw(); toast(r.kind === "rsvp" ? "RSVP cancelled" : "Sign-up cancelled");
-      } }, r.kind === "rsvp" ? "Not going" : "Cancel"))));
+      h("div", h("b", r.slug ? link(`/events/${r.slug}`, {}, r.title) : r.title), h("div.muted", r.sub, r.pay?.status === "paid" ? ", paid" : "")),
+      h("div.row.mine-actions",
+        r.pay?.status === "pending" ? link(`/shop/order/${r.pay.code}`, { class: "btn small" }, "Pay") : null,
+        h("button.btn.small.ghost", { type: "button", onclick: async () => {
+          await api(`/api/me/${token}/cancel`, { method: "POST", body: { kind: r.kind, id: r.id } });
+          rows.splice(rows.indexOf(r), 1); draw();
+          toast(r.pay?.status === "paid" ? "Cancelled. We'll be in touch about a refund." : r.kind === "rsvp" ? "RSVP cancelled" : "Sign-up cancelled");
+        } }, r.kind === "rsvp" ? "Not going" : "Cancel")))));
   };
   draw();
   const remove = h("section.forget",

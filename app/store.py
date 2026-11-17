@@ -126,6 +126,7 @@ def events_out(rows, admin=False):
         e = {k: r[k] for k in ("id", "slug", "title", "starts_at", "ends_at", "location", "map_url", "summary",
                                "status", "capacity")}
         e["all_day"] = bool(r["all_day"])
+        e["price"] = r.get("price") or 0
         e["rsvp_enabled"] = bool(r["rsvp_enabled"])
         e["tags"] = tags.get(r["id"], [])
         e["cover"] = covers.get(r.get("cover_photo_id"))
@@ -217,9 +218,11 @@ def sheet_out(s, admin=False):
                 "ask_servings": bool(sl["ask_servings"]), "is_other": bool(sl["is_other"]),
                 "photo_id": sl["photo_id"], "image": photos.get(sl["photo_id"]),
                 "taken": taken, "left": 999 if cap == 0 else max(0, cap - taken),
-                "servings": sum(u["servings"] or 0 for u in ups), "choices": choices}
+                "servings": sum(u["servings"] or 0 for u in ups), "choices": choices, "price": sl.get("price") or 0}
         if admin:
-            item["signups"] = [{k: u[k] for k in ("id", "name", "email", "phone", "qty", "item", "servings", "choice_id", "created")} for u in ups]
+            pay = order_states([u.get("order_id") for u in ups])
+            item["signups"] = [{**{k: u[k] for k in ("id", "name", "email", "phone", "qty", "item", "servings", "choice_id", "created")},
+                                "pay": pay.get(u.get("order_id"))} for u in ups]
         else:
             item["people"] = [{"name": short_name(u["name"]) if s["show_names"] else "", "item": u["item"], "qty": u["qty"],
                                "servings": u["servings"], "choice": u["choice_id"]} for u in ups]
@@ -239,6 +242,23 @@ def sheet_out(s, admin=False):
             ev["going"] = going_count(s["event_id"])
         o["event"] = ev
     return o
+
+
+def order_states(ids):
+    """{order id: {code, status}} for the orders holding paid RSVPs or sign-ups."""
+    ids = [i for i in ids if i]
+    if not ids:
+        return {}
+    return {o["id"]: {"code": o["code"], "status": o["status"]}
+            for o in db.q(f"SELECT id, code, status FROM orders WHERE id IN ({','.join('?' * len(ids))})", tuple(ids))}
+
+
+def _locked():
+    c = db.conn()
+    if c.in_transaction:
+        c.commit()
+    c.execute("BEGIN IMMEDIATE")
+    return c
 
 
 def ensure_other_slot(sheet_id, on):
@@ -271,7 +291,7 @@ def confirm_email(email, name, token, title, rows, ev=None):
     mailer.queue(email, title, h, t, mailer.ics_for([ev]) if ev else None, "confirmation")
 
 
-def signup(slot_id, body):
+def signup(slot_id, body, by_team=False, ip=None):
     slot = db.one("SELECT * FROM slots WHERE id=?", (slot_id,))
     if not slot:
         raise Invalid("That slot no longer exists.", status=404)
@@ -302,11 +322,10 @@ def signup(slot_id, body):
             raise Invalid("About how many people will it feed? Enter a number.", "servings")
         servings = int(raw)
     tok = my_token(email)
+    price = 0 if by_team else (slot.get("price") or 0)  # someone the team adds by hand settles up with the team
+    code = None
     # Check room and insert under one write lock, so two people can't both take the last spot or the same item.
-    c = db.conn()
-    if c.in_transaction:
-        c.commit()
-    c.execute("BEGIN IMMEDIATE")
+    c = _locked()
     try:
         if slot["capacity"]:
             taken = c.execute("SELECT COALESCE(SUM(qty),0) FROM signups WHERE slot_id=?", (slot_id,)).fetchone()[0]
@@ -318,13 +337,29 @@ def signup(slot_id, body):
             if got >= choice["need"]:
                 raise Invalid(f"Someone just took {choice['title']}. Pick another.", "choice")
         reminders, news = email_prefs(body)
-        sid = c.execute("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, choice_id, reminders, news, token, created) "
-                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (slot_id, name, email, clean(body.get("phone"), 30), qty, item, servings,
-                                                              choice["id"] if choice else None, reminders, news, tok, db.now_iso())).lastrowid
+        oid = None
+        if price:
+            from . import shop
+            line = {"slot_id": slot_id, "sheet_id": sheet["id"], "name": slot["title"] + (f": {item}" if item else ""), "option": "",
+                    "qty": qty, "price": price,
+                    "data": {"phone": clean(body.get("phone"), 30), "item": item, "servings": servings,
+                             "choice_id": choice["id"] if choice else None, "reminders": reminders, "news": news}}
+            oid, code = shop.hold_order(c, line, name, email, ip)
+        sid = c.execute("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, choice_id, reminders, news, token, created, order_id) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (slot_id, name, email, clean(body.get("phone"), 30), qty, item, servings,
+                                                                choice["id"] if choice else None, reminders, news, tok, db.now_iso(), oid)).lastrowid
         c.commit()
     except Exception:
         c.rollback()
         raise
+    if news:
+        subscribe(email, name, "sign-up")
+    if code:
+        from . import shop
+        o = db.one("SELECT * FROM orders WHERE code=?", (code,))
+        shop.order_email(o, "placed")
+        shop.alert_team(o, "new")
+        return {"id": sid, "pay": code}
     ev = db.one("SELECT * FROM events WHERE id=?", (sheet["event_id"],)) if sheet["event_id"] else None
     rows = [("Sign-up", sheet["title"]), ("Slot", slot["title"] + (f" ×{qty}" if qty > 1 else "")), ("Bringing", item),
             ("Serves", f"About {servings}" if servings else "")]
@@ -333,8 +368,6 @@ def signup(slot_id, body):
     if ev:
         rows += [("Event", ev["title"]), ("When", mailer.fmt_when(ev)), ("Where", ev["location"])]
     confirm_email(email, name, tok, f"You're signed up: {slot['title']}", rows, ev)
-    if news:
-        subscribe(email, name, "sign-up")
     return {"id": sid}
 
 
@@ -355,7 +388,7 @@ def fmt_slot_time(slot):
     return s
 
 
-def rsvp(ev, body):
+def rsvp(ev, body, ip=None):
     if not ev["rsvp_enabled"]:
         raise Invalid("RSVPs are off for this event.")
     if ev["starts_at"] < db.now_iso():
@@ -381,6 +414,8 @@ def rsvp(ev, body):
         return {"status": existing["status"], "already": True, "going": going_count(ev["id"])}
     tok = existing["token"] if existing else my_token(email)
     reminders, news = email_prefs(body)
+    if status == "going" and (ev.get("price") or 0) > 0:
+        return paid_rsvp(ev, name, email, guests, reminders, news, tok, ip)
     if existing:
         db.run("UPDATE rsvps SET status=?, guests=?, reminders=?, news=? WHERE id=?", (status, guests, reminders, news, existing["id"]))
     else:
@@ -393,6 +428,36 @@ def rsvp(ev, body):
                 ("Guests", f"You + {guests}" if guests else "")]
         confirm_email(email, name, tok, f"You're going to {ev['title']}", rows, ev)
     return {"status": status, "going": going_count(ev["id"])}
+
+
+def paid_rsvp(ev, name, email, guests, reminders, news, tok, ip):
+    """A paid event: hold the spot with an unpaid order. The usual confirmation goes out once it's paid."""
+    from . import shop
+    c = _locked()
+    try:
+        if c.execute("SELECT 1 FROM rsvps WHERE event_id=? AND lower(email)=?", (ev["id"], email)).fetchone():
+            raise Invalid("You already have an RSVP for this event. Check your email for the link to change it.")
+        if ev["capacity"]:
+            going = c.execute("SELECT COUNT(*) + COALESCE(SUM(guests),0) FROM rsvps WHERE event_id=? AND status='going'",
+                              (ev["id"],)).fetchone()[0]
+            if going + 1 + guests > ev["capacity"]:
+                left = ev["capacity"] - going
+                raise Invalid("This event is full." if left <= 0 else f"Only {left} spots left.", "guests")
+        line = {"event_id": ev["id"], "name": f"RSVP: {ev['title']}", "option": "", "qty": 1 + guests, "price": ev["price"],
+                "data": {"reminders": reminders, "news": news}}
+        oid, code = shop.hold_order(c, line, name, email, ip)
+        c.execute("INSERT INTO rsvps(event_id, name, email, guests, status, reminders, news, token, created, order_id) "
+                  "VALUES (?,?,?,?,'going',?,?,?,?,?)", (ev["id"], name, email, guests, reminders, news, tok, db.now_iso(), oid))
+        c.commit()
+    except Exception:
+        c.rollback()
+        raise
+    if news:
+        subscribe(email, name, "rsvp")
+    o = db.one("SELECT * FROM orders WHERE id=?", (oid,))
+    shop.order_email(o, "placed")
+    shop.alert_team(o, "new")
+    return {"status": "going", "pay": code, "going": going_count(ev["id"])}
 
 
 def subscribe(email, name="", source=""):

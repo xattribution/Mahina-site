@@ -1,7 +1,7 @@
 // Public shop: products, a cart, checkout, and the order page where people pay with Venmo.
-import { h, $, $$, api, clear, go, icon, link, shareButton, hint, toast, modal, field, input, onSubmit, honeypot, me, setTitle, media, copy, CFG, empty, plural } from "./core.js";
+import { h, $, $$, api, clear, go, icon, link, shareButton, hint, toast, modal, field, input, onSubmit, honeypot, me, setTitle, media, copy, CFG, empty, plural, money, longDate, parse, time } from "./core.js";
 
-export const money = (c) => "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+export { money };
 const label = (it) => it.name + (it.option ? ` (${it.option})` : "");
 
 // The cart lives in this browser only, so it survives a refresh but never leaves the device until checkout.
@@ -112,12 +112,13 @@ const STATUS = { pending: ["Waiting for payment", "pending"], paid: ["Paid", "pa
 
 export async function orderPage({ code }) {
   let o = await api(`/api/shop/orders/${encodeURIComponent(code)}`);
-  setTitle(`Order ${o.code}`);
+  const evt = o.kind === "event";
+  setTitle(evt ? `Payment ${o.code}` : `Order ${o.code}`);
   const box = h("div.order");
   let timer = null;
   const stop = () => { clearInterval(timer); timer = null; };
   const draw = () => {
-    const [st, cls] = o.picked_up ? ["Picked up", "paid"] : STATUS[o.status] || [o.status, ""];
+    const [st, cls] = o.picked_up && !evt ? ["Picked up", "paid"] : STATUS[o.status] || [o.status, ""];
     const qr = CFG.demo ? (window.MAHINA_DEMO.qr?.() || "") : `/api/shop/orders/${o.code}/qr.svg`;
     clear(box).append(
       h("div.order-head", h("h1.h1", o.code), h("span.order-status", { class: cls }, o.status === "paid" ? icon("check", 18) : null, st)),
@@ -129,12 +130,15 @@ export async function orderPage({ code }) {
           h("dt", "To"), h("dd", "@" + o.venmo.handle),
           h("dt", "Note", hint("Keep this note on the payment. It's how we match your payment to your order.")),
           h("dd", `${window.SITE.club_name} order `, h("span.nowrap", o.code,
-            h("button.icon-btn.copy-code", { type: "button", "aria-label": "Copy order code", title: "Copy order code", onclick: () => copy(o.code) }, icon("copy", 16)))))) : null,
+            h("button.icon-btn.copy-code", { type: "button", "aria-label": "Copy order code", title: "Copy order code", onclick: () => copy(o.code) }, icon("copy", 16)))),
+          o.held_until ? [h("dt", "Spot held until"), h("dd", `${longDate(parse(o.held_until))}, ${time(parse(o.held_until))}`)] : null)) : null,
       h("section.order-items",
         h("ul", o.items.map((it) => h("li", h("span", `${it.qty} × ${label(it)}`), h("span.num", money(it.qty * it.price))))),
         h("div.cart-total", h("span", "Total"), h("b.num", money(o.total)))),
       o.pickup && o.status !== "cancelled" ? h("p.shop-note", o.pickup) : null,
-      h("div.row", link("/shop", { class: "btn ghost" }, icon("left", 18), "Back to shop")));
+      h("div.row", evt
+        ? link(o.event ? `/events/${o.event.slug}` : `/signups/${o.sheet_id}`, { class: "btn ghost" }, icon("left", 18), o.event ? o.event.title : "Back")
+        : link("/shop", { class: "btn ghost" }, icon("left", 18), "Back to shop")));
   };
   draw();
   // Watch for the payment to come through while the page is open.

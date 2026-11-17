@@ -142,6 +142,7 @@ const VIEWS = [["open", "To do"], ["waiting", "Waiting for payment"], ["hand_out
 function statusPill(o) {
   if (o.status === "cancelled") return pill("cancelled", "Cancelled");
   if (o.status === "pending") return pill("pending", "Waiting");
+  if (o.kind === "event") return pill("published", "Paid");
   return o.picked_up ? pill("published", o.channel === "table" ? "Sold" : "Picked up") : pill("open", "Paid");
 }
 
@@ -192,7 +193,7 @@ async function ordersTab(data, reload, setTab, focus) {
     const b = [];
     if (o.status === "pending") b.push(h("button.btn.small", { type: "button", onclick: () => payDialog(o) }, "Mark paid"));
     if (o.status === "paid" && !o.picked_up) b.push(h("button.btn.small.dark", { type: "button", onclick: () => act(o, "picked_up") }, "Handed out"));
-    if (o.status === "paid" && o.picked_up && o.channel === "online") b.push(h("button.btn.small.ghost", { type: "button", onclick: () => act(o, "not_picked_up") }, "Undo"));
+    if (o.status === "paid" && o.picked_up && o.channel === "online" && o.kind !== "event") b.push(h("button.btn.small.ghost", { type: "button", onclick: () => act(o, "not_picked_up") }, "Undo"));
     b.push(h("button.icon-btn", { type: "button", "aria-label": `Send ${o.code} to someone`, title: "Send to someone", onclick: () => sendDialog(o, data.people || [], draw) }, icon("send", 16)));
     if (o.status === "pending" || (o.status === "paid" && isAdmin())) b.push(h("button.icon-btn", { type: "button", "aria-label": `Cancel ${o.code}`, title: "Cancel order", onclick: () => cancelDialog(o) }, icon("close", 16)));
     return h("div.row", { style: { gap: "6px", flexWrap: "nowrap", justifyContent: "flex-end" } }, b);
@@ -200,7 +201,7 @@ async function ordersTab(data, reload, setTab, focus) {
   const cancelDialog = (o) => {
     const paid = o.status === "paid";
     const form = h("form",
-      h("p", paid ? `Refund the ${money(o.total)} in Venmo or cash yourself.` : `${o.code} for ${money(o.total)}.`, o.picked_up ? "" : " The items go back in stock."),
+      h("p", paid ? `Refund the ${money(o.total)} in Venmo or cash yourself.` : `${o.code} for ${money(o.total)}.`, o.kind === "event" ? " Their spot is released." : o.picked_up ? "" : " The items go back in stock."),
       field("Reason", input("reason", { maxlength: 200, required: paid, placeholder: paid ? "Refunded, wrong size" : "" }), { optional: !paid }),
       h("p.form-error"),
       h("div.row.end", h("button.btn.ghost", { type: "button", onclick: () => m.close() }, "Keep it"), h("button.btn.danger", { type: "submit" }, "Cancel order")));

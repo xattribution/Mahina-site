@@ -394,7 +394,7 @@ function eventForm(ev, allTags) {
     const starts_at = `${v.date}T${v.all_day ? "00:00" : v.start || "00:00"}`;
     const ends_at = v.end && !v.all_day ? `${v.date}T${v.end}` : (v.all_day ? `${v.date}T23:59` : "");
     const body = { ...v, starts_at, ends_at, status: st.status, tag_ids: [...st.tags], cover_photo_id: st.cover_id, reminders: [...st.reminders],
-      rsvp_enabled: $("[name=rsvp_enabled]", panel).checked, capacity: $("[name=capacity]", panel).value,
+      rsvp_enabled: $("[name=rsvp_enabled]", panel).checked, capacity: $("[name=capacity]", panel).value, price: $("[name=price]", panel).value,
       donate: $("[name=donate]", panel).checked, donate_note: $("[name=donate_note]", panel).value };
     if (ev) {
       await api(`/api/admin/events/${ev.id}`, { method: "PUT", body });
@@ -412,7 +412,9 @@ function eventForm(ev, allTags) {
     h("div.panel-block", h("span.field-label", "Tags", hint("Tags color the timeline and link events to gallery photos.")), tagBox),
     h("div.panel-block", h("span.field-label", "RSVPs"),
       sw("rsvp_enabled", "Take RSVPs", e.rsvp_enabled),
-      field("Capacity", input("capacity", { type: "number", min: 1, value: e.capacity || "", placeholder: "No limit" }), { optional: true })),
+      field("Capacity", input("capacity", { type: "number", min: 1, value: e.capacity || "", placeholder: "No limit" }), { optional: true }),
+      field("Price per person", input("price", { inputmode: "decimal", value: toDollars(e.price), placeholder: "Free" }), { optional: true,
+        hintText: window.SITE?.venmo ? "Guests pay too. People pay with Venmo, and their spot is held for 24 hours." : "Add the club's Venmo handle under Settings > Give first." })),
     h("div.panel-block", h("span.field-label", "Donations", hint(window.SITE?.venmo
         ? "Shows a Venmo QR code on the event page. Payments open with the event name as the note."
         : "Add the club's Venmo handle under Settings > Give first.")),
@@ -477,7 +479,7 @@ function sheetCard(s, ev, redraw) {
         sl.signups.length ? sl.signups.map((u) => h("div.who",
           h("span.strong", u.name),
           h("a", { href: `mailto:${u.email}`, class: "muted" }, u.email),
-          h("span", u.item || h("span.muted", "–")),
+          h("span", u.item || h("span.muted", "–"), u.pay ? h("span.roster-pay", payCell(u.pay)) : null),
           h("span.num.qty", { title: `${u.name} is bringing ${u.qty}` }, `×${u.qty}`),
           h("span.num", u.servings || h("span.muted", "–")),
           h("button.icon-btn", { type: "button", "aria-label": `Remove ${u.name}`, onclick: async () => {
@@ -529,8 +531,10 @@ function pickSlotImage(current, onPick) {
     .catch(() => clear(grid));
 }
 
+const toDollars = (c) => (c ? (c / 100).toFixed(2).replace(/\.00$/, "") : "");
+
 function sheetForm(s, ev, onSaved, events) {
-  s = { ...s, slots: (s.slots || []).filter((x) => !x.is_other).map((x) => ({ ...x })) };
+  s = { ...s, slots: (s.slots || []).filter((x) => !x.is_other).map((x) => ({ ...x, price: toDollars(x.price) })) };
   const rows = h("div.rows-edit");
   const evDate = ev ? ev.starts_at.slice(0, 10) : "";
   const drawRows = () => {
@@ -548,6 +552,7 @@ function sheetForm(s, ev, onSaved, events) {
         pic,
         h("input", { type: "text", value: sl.title, placeholder: "Slot name", "aria-label": "Slot name", oninput: bind("title") }),
         h("input", { type: "number", min: 0, value: sl.capacity || "", placeholder: "No limit", "aria-label": "How many", oninput: (x) => { sl.capacity = x.target.value === "" ? 0 : Number(x.target.value); } }),
+        h("input", { type: "text", inputmode: "decimal", value: sl.price || "", placeholder: "Free", "aria-label": "Price", oninput: bind("price") }),
         h("input", { type: "time", value: tval(sl.starts_at), "aria-label": "Start time", oninput: (x) => (sl.starts_at = toIso(x.target.value)) }),
         h("input", { type: "time", value: tval(sl.ends_at), "aria-label": "End time", oninput: (x) => (sl.ends_at = toIso(x.target.value)) }),
         h("label.check.center", { "data-label": "Ask what" }, h("input", { type: "checkbox", checked: sl.ask_item, "aria-label": "Ask what they're bringing", onchange: bind("ask_item") })),
@@ -563,12 +568,12 @@ function sheetForm(s, ev, onSaved, events) {
     field("Note", input("description", { value: s.description }), { optional: true }),
     events ? field("Event", sel("event_id", [["", "No event"], ...events.map((e) => [e.id, `${e.title}, ${dateCell(e.starts_at)}`])], s.event_id)) : null,
     h("div",
-      h("div.row-head", h("span"), h("span"), h("span", "Slot"), h("span", "How many", hint("Leave blank for no limit.")), h("span", "Starts"), h("span", "Ends"),
+      h("div.row-head", h("span"), h("span"), h("span", "Slot"), h("span", "How many", hint("Leave blank for no limit.")), h("span", "Price", hint("Per spot. People pay with Venmo, and the spot is held for 24 hours.")), h("span", "Starts"), h("span", "Ends"),
         h("span", "Ask what", hint("People say what they're bringing, like a dish name. Everyone can see the list.")),
         h("span", "Servings", hint("People say about how many it feeds, so you can see if there's enough of each thing.")),
         h("span", "", hint("Optional. List specific things for this slot, like Turkey or Ham. People pick one and it shows as taken.")), h("span")),
       rows,
-      h("button.btn.small.ghost", { type: "button", style: { marginTop: "12px" }, onclick: () => { s.slots.push({ title: "", capacity: 1, ask_item: false, ask_servings: false }); drawRows(); $$(".row-edit input[aria-label='Slot name']", rows).at(-1)?.focus(); } }, icon("plus", 16), "Add slot")),
+      h("button.btn.small.ghost", { type: "button", style: { marginTop: "12px" }, onclick: () => { s.slots.push({ title: "", capacity: 1, ask_item: false, ask_servings: false, price: "" }); drawRows(); $$(".row-edit input[aria-label='Slot name']", rows).at(-1)?.focus(); } }, icon("plus", 16), "Add slot")),
     h("div.two",
       field("Status", sel("status", [["open", "Open"], ["closed", "Closed"], ["hidden", "Hidden"]], s.status)),
       field("Closes", input("closes_at", { type: "datetime-local", value: s.closes_at || "" }), { optional: true })),
@@ -616,9 +621,17 @@ async function sheetEditorPage(id) {
     h("section.a-section", h("h2", "Edit"), sheetForm(s, null, () => { toast("Saved"); draw(); }, events)));
 }
 
+// Payment state for a paid RSVP or sign-up. People with Shop access can open the order to mark it paid.
+function payCell(pay) {
+  if (!pay) return h("span.muted", "–");
+  const label = pay.status === "paid" ? pill("yes", "Paid") : pay.status === "pending" ? pill("pending", "Unpaid") : pill("closed", "Cancelled");
+  return can("shop") ? aLink(`/shop?tab=orders&order=${pay.code}`, { class: "pay-link", title: `Order ${pay.code}` }, label) : label;
+}
+
 function rsvpTab(ev) {
   const going = ev.rsvps.filter((r) => r.status === "going");
   const total = going.reduce((a, r) => a + 1 + r.guests, 0);
+  const paid = ev.price || ev.rsvps.some((r) => r.pay);
   const wrap = h("div");
   const draw = () => clear(wrap).append(
     h("div.a-head", h("div", h("h2.h3", `${total} going`), h("div.a-sub", `${plural(going.length, "RSVP")}, ${total - going.length} guests`)),
@@ -626,10 +639,10 @@ function rsvpTab(ev) {
         can("email") ? aLink(`/email?event=${ev.id}`, { class: "btn small ghost" }, icon("mail", 16), "Email attendees") : null,
         h("button.btn.small.ghost", { type: "button", onclick: csv(`/api/admin/events/${ev.id}/export.csv`) }, icon("download", 16), "Roster CSV"))),
     ev.rsvps.length ? h("div.tbl-wrap", h("table.tbl",
-      h("thead", h("tr", h("th", "Name"), h("th", "Email"), h("th", "Status"), h("th.num", "Guests"), h("th", "When"), h("th"))),
+      h("thead", h("tr", h("th", "Name"), h("th", "Email"), h("th", "Status"), h("th.num", "Guests"), paid ? h("th", "Payment") : null, h("th", "When"), h("th"))),
       h("tbody", ev.rsvps.map((r) => h("tr",
         h("td.strong", r.name), h("td", h("a", { href: `mailto:${r.email}` }, r.email)), h("td", pill(r.status === "going" ? "yes" : r.status === "no" ? "closed" : "pending", r.status === "no" ? "Not going" : r.status[0].toUpperCase() + r.status.slice(1))),
-        h("td.num", r.guests || "–"), h("td.sub", ago(r.created)),
+        h("td.num", r.guests || "–"), paid ? h("td", payCell(r.pay)) : null, h("td.sub", ago(r.created)),
         h("td.actions", h("button.icon-btn", { type: "button", "aria-label": `Remove ${r.name}`, onclick: async () => {
           if (await confirmBox(`Remove ${r.name}'s RSVP?`, { ok: "Remove" })) { await api(`/api/admin/rsvps/${r.id}`, { method: "DELETE" }); ev.rsvps.splice(ev.rsvps.indexOf(r), 1); draw(); }
         } }, icon("close", 16))))))))
@@ -656,9 +669,11 @@ function peopleTab(ev) {
   const status = (p) => !p.rsvp ? h("span.sub", "No RSVP")
     : h("span", pill(p.rsvp.status === "going" ? "yes" : p.rsvp.status === "no" ? "closed" : "pending",
       p.rsvp.status === "no" ? "Not going" : p.rsvp.status === "going" ? "Going" : "Maybe"),
-      p.rsvp.guests ? h("span.sub", ` +${p.rsvp.guests}`) : null);
+      p.rsvp.guests ? h("span.sub", ` +${p.rsvp.guests}`) : null,
+      p.rsvp.pay === "pending" ? h("span.unpaid", " Unpaid") : null);
   const signed = (p) => p.signups.length ? h("ul.plain", p.signups.map((u) =>
-    h("li", u.item ? h("span", h("b", u.item), h("span.sub", ` · ${u.slot}`)) : u.slot, u.qty > 1 ? h("span.sub", ` ×${u.qty}`) : null)))
+    h("li", u.item ? h("span", h("b", u.item), h("span.sub", ` · ${u.slot}`)) : u.slot, u.qty > 1 ? h("span.sub", ` ×${u.qty}`) : null,
+      u.pay === "pending" ? h("span.unpaid", " Unpaid") : null)))
     : h("span.sub", "Nothing");
   const who = (p) => h("td",
     h("div.strong", p.name, p.match === "name" ? hint(`Matched by name. Used ${p.emails.join(" and ")}.`) : null),

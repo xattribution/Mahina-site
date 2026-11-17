@@ -286,7 +286,7 @@ def event_rsvp(slug: str, request: Request, body: dict = Body(...)):
     honeypot(body)
     throttle(request, "rsvp", 20)
     throttle_email("mail", body.get("email"), 8)
-    return store.rsvp(get_event(slug), body)
+    return store.rsvp(get_event(slug), body, ip=request.client.host if request.client else "")
 
 
 @app.get("/api/events/{slug}/calendar.ics")
@@ -327,7 +327,7 @@ def slot_signup(slot_id: int, request: Request, body: dict = Body(...)):
     honeypot(body)
     throttle(request, "signup", 30)
     throttle_email("mail", body.get("email"), 8)
-    return store.signup(slot_id, body)
+    return store.signup(slot_id, body, ip=request.client.host if request.client else "")
 
 
 # ---------- manage my sign-ups ----------
@@ -344,14 +344,17 @@ def email_for_token(tok):
 def me(tok: str):
     email = email_for_token(tok)
     now = db.now_iso()
-    rs = db.q("""SELECT r.id, r.status, r.guests, r.name, e.slug, e.title, e.starts_at, e.location FROM rsvps r
+    rs = db.q("""SELECT r.id, r.status, r.guests, r.name, r.order_id, e.slug, e.title, e.starts_at, e.location FROM rsvps r
                  JOIN events e ON e.id=r.event_id WHERE lower(r.email)=? AND e.starts_at > ? ORDER BY e.starts_at""",
               (email, now))
-    sg = db.q("""SELECT sg.id, sg.qty, sg.item, sg.name, sl.title slot, sl.starts_at slot_start, sh.title sheet,
+    sg = db.q("""SELECT sg.id, sg.qty, sg.item, sg.name, sg.order_id, sl.title slot, sl.starts_at slot_start, sh.title sheet,
                  e.slug, e.title event, e.starts_at FROM signups sg JOIN slots sl ON sl.id=sg.slot_id
                  JOIN sheets sh ON sh.id=sl.sheet_id LEFT JOIN events e ON e.id=sh.event_id
                  WHERE lower(sg.email)=? AND (e.id IS NULL OR e.starts_at > ?) ORDER BY COALESCE(e.starts_at, sl.starts_at)""",
               (email, now))
+    pay = store.order_states([r["order_id"] for r in rs + sg])
+    for r in rs + sg:
+        r["pay"] = pay.get(r.pop("order_id"))
     sub = db.one("SELECT active FROM subscribers WHERE email=?", (email,))
     name = (rs[0]["name"] if rs else sg[0]["name"] if sg else "")
     return {"email": email, "name": name, "rsvps": rs, "signups": sg, "subscribed": bool(sub and sub["active"])}
@@ -361,12 +364,25 @@ def me(tok: str):
 def me_cancel(tok: str, body: dict = Body(...)):
     email = email_for_token(tok)
     kind, rid = body.get("kind"), int(body.get("id") or 0)
-    if kind == "rsvp":
-        db.run("UPDATE rsvps SET status='no' WHERE id=? AND lower(email)=?", (rid, email))
-    elif kind == "signup":
-        db.run("DELETE FROM signups WHERE id=? AND lower(email)=?", (rid, email))
-    else:
+    if kind not in ("rsvp", "signup"):
         raise Invalid("Nothing to cancel.")
+    row = db.one(f"SELECT * FROM {'rsvps' if kind == 'rsvp' else 'signups'} WHERE id=? AND lower(email)=?", (rid, email))
+    if not row:
+        return {"ok": True}
+    from . import shop
+    o = db.one("SELECT * FROM orders WHERE id=?", (row["order_id"],)) if row.get("order_id") else None
+    if o and o["status"] == "pending":
+        # Not paid yet: cancelling the payment frees the spot (and removes the RSVP or sign-up with it).
+        before, done = shop.cancel(o["id"], "Cancelled by the person who signed up.")
+        if done:
+            shop.order_email(before, "cancelled")
+        return {"ok": True}
+    if kind == "rsvp":
+        db.run("UPDATE rsvps SET status='no' WHERE id=?", (rid,))
+    else:
+        db.run("DELETE FROM signups WHERE id=?", (rid,))
+    if o and o["status"] == "paid":
+        shop.flag_refund(o["id"], "Cancelled their RSVP" if kind == "rsvp" else "Cancelled their sign-up")
     return {"ok": True}
 
 

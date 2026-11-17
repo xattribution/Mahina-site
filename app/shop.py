@@ -222,16 +222,44 @@ def line_text(ln):
     return f"{ln['qty']}× {ln['name']}" + (f" ({ln['option']})" if ln["option"] else "")
 
 
+def is_event(o):
+    return (o.get("kind") or "shop") == "event"
+
+
+def held_until(o):
+    return (datetime.fromisoformat(o["created"]) + timedelta(hours=HOLD_HOURS["online"])).isoformat(timespec="minutes")
+
+
+def event_of(o):
+    """The event an event order is for (from its first line), as {slug, title, starts_at}, or None."""
+    for ln in _json(o["items"], []):
+        eid = ln.get("event_id")
+        if not eid and ln.get("slot_id"):
+            r = db.one("SELECT sh.event_id FROM slots sl JOIN sheets sh ON sh.id=sl.sheet_id WHERE sl.id=?", (ln["slot_id"],))
+            eid = r and r["event_id"]
+        if eid:
+            return db.one("SELECT slug, title, starts_at FROM events WHERE id=?", (eid,))
+        if ln.get("sheet_id"):
+            return None
+    return None
+
+
 def order_out(o, admin=False):
-    items = _json(o["items"], [])
+    items = [{k: v for k, v in ln.items() if k != "data"} for ln in _json(o["items"], [])]
     out = {"code": o["code"], "status": o["status"], "total": o["total"], "items": items, "created": o["created"],
-           "paid": o["status"] == "paid", "picked_up": bool(o["picked_up_at"]), "channel": o["channel"]}
+           "paid": o["status"] == "paid", "picked_up": bool(o["picked_up_at"]), "channel": o["channel"],
+           "kind": o.get("kind") or "shop"}
+    if is_event(o):
+        out["event"] = event_of(o)
+        out["sheet_id"] = next((ln.get("sheet_id") for ln in items if ln.get("sheet_id")), None)
+        if o["status"] == "pending":
+            out["held_until"] = held_until(o)
     if o["status"] == "pending" and venmo_handle():
         out["venmo"] = {"handle": venmo_handle(), "link": pay_link(o)}
     if admin:
         out.update(id=o["id"], name=o["name"], email=o["email"], method=o["method"], note=o["note"], paid_at=o["paid_at"],
                    paid_by=o["paid_by"], picked_up_at=o["picked_up_at"], sent_to=_json(o.get("sent_to"), []))
-    else:
+    elif not is_event(o):
         out["pickup"] = db.get_setting("shop_note") or ""
     return out
 
@@ -252,18 +280,7 @@ def create_order(body, channel, by=None, ip=None):
         raise Invalid("Add the club's Venmo handle in Settings first." if by else "Online orders aren't open yet.")
     c = _begin()
     try:
-        nk = network_key(ip) if online else ""
-        try:
-            a_ = ipaddress.ip_address(ip or "")
-            v6 = a_.version == 6 and not a_.ipv4_mapped
-        except ValueError:
-            v6 = False
-        net_cap = ONLINE_OPEN_PER_NETWORK if v6 else ONLINE_OPEN_PER_IPV4
-        if online and (c.execute("SELECT COUNT(*) FROM orders WHERE status='pending' AND channel='online' AND lower(email)=?",
-                                 (em,)).fetchone()[0] >= ONLINE_OPEN_PER_EMAIL or
-                       c.execute("SELECT COUNT(*) FROM orders WHERE status='pending' AND channel='online' AND ip_key=?",
-                                 (nk,)).fetchone()[0] >= net_cap):
-            raise Invalid("You have orders waiting for payment. Pay for those first, or contact us.")
+        nk = open_order_check(c, em, ip) if online else ""
         lines, total = reserve(c, body.get("items"), online=online)
         if online and total == 0:
             raise Invalid("Free items are handed out at events, not ordered online.")
@@ -286,6 +303,79 @@ def create_order(body, channel, by=None, ip=None):
     return o
 
 
+def open_order_check(c, email, ip):
+    """Caps on unpaid holds, shared by shop orders and paid RSVPs/sign-ups: per email and per network."""
+    nk = network_key(ip)
+    try:
+        a_ = ipaddress.ip_address(ip or "")
+        v6 = a_.version == 6 and not a_.ipv4_mapped
+    except ValueError:
+        v6 = False
+    net_cap = ONLINE_OPEN_PER_NETWORK if v6 else ONLINE_OPEN_PER_IPV4
+    if (c.execute("SELECT COUNT(*) FROM orders WHERE status='pending' AND channel='online' AND lower(email)=?",
+                  (email,)).fetchone()[0] >= ONLINE_OPEN_PER_EMAIL or
+            c.execute("SELECT COUNT(*) FROM orders WHERE status='pending' AND channel='online' AND ip_key=?",
+                      (nk,)).fetchone()[0] >= net_cap):
+        raise Invalid("You have payments waiting. Pay for those first, or contact us.")
+    return nk
+
+
+def hold_order(c, line, name, email, ip):
+    """Inside the caller's write lock: open an unpaid event order for one RSVP or sign-up. Returns (order id, code)."""
+    if not venmo_handle():
+        raise Invalid("Payments aren't set up yet. Contact us to sign up.")
+    nk = open_order_check(c, email, ip)
+    code = new_code(c)
+    oid = c.execute("INSERT INTO orders(code, name, email, items, total, status, method, channel, created, ip_key, kind) "
+                    "VALUES (?,?,?,?,?,'pending','','online',?,?,'event')",
+                    (code, name, email, json.dumps([line]), line["price"] * line["qty"], db.now_iso(), nk)).lastrowid
+    return oid, code
+
+
+def release_event(c, oid):
+    """An event order was cancelled or expired: free the spot it was holding."""
+    c.execute("DELETE FROM rsvps WHERE order_id=?", (oid,))
+    c.execute("DELETE FROM signups WHERE order_id=?", (oid,))
+
+
+def _rehold(c, o):
+    """A released event order got paid after all: put the RSVP or sign-up back if there's still room. Raises Invalid if not."""
+    for ln in _json(o["items"], []):
+        d = ln.get("data") or {}
+        if ln.get("event_id"):
+            ev = c.execute("SELECT * FROM events WHERE id=?", (ln["event_id"],)).fetchone()
+            if not ev or ev["status"] != "published":
+                raise Invalid("gone")
+            if c.execute("SELECT 1 FROM rsvps WHERE event_id=? AND lower(email)=?", (ev["id"], o["email"])).fetchone():
+                raise Invalid("already")
+            going = c.execute("SELECT COUNT(*) + COALESCE(SUM(guests),0) FROM rsvps WHERE event_id=? AND status='going'", (ev["id"],)).fetchone()[0]
+            if ev["capacity"] and going + ln["qty"] > ev["capacity"]:
+                raise Invalid("full")
+            c.execute("INSERT INTO rsvps(event_id, name, email, guests, status, reminders, news, token, created, order_id) "
+                      "VALUES (?,?,?,?,'going',?,?,?,?,?)", (ev["id"], o["name"], o["email"], ln["qty"] - 1, d.get("reminders", 1),
+                                                             d.get("news"), store.my_token(o["email"]), db.now_iso(), o["id"]))
+        elif ln.get("slot_id"):
+            sl = c.execute("SELECT * FROM slots WHERE id=?", (ln["slot_id"],)).fetchone()
+            if not sl:
+                raise Invalid("gone")
+            taken = c.execute("SELECT COALESCE(SUM(qty),0) FROM signups WHERE slot_id=?", (sl["id"],)).fetchone()[0]
+            if sl["capacity"] and taken + ln["qty"] > sl["capacity"]:
+                raise Invalid("full")
+            c.execute("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, choice_id, reminders, news, token, created, order_id) "
+                      "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (sl["id"], o["name"], o["email"], d.get("phone", ""), ln["qty"], d.get("item", ""),
+                                                             d.get("servings"), d.get("choice_id"), d.get("reminders", 1), d.get("news"),
+                                                             store.my_token(o["email"]), db.now_iso(), o["id"]))
+
+
+def flag_refund(oid, what):
+    """Someone cancelled a paid RSVP or sign-up: note it on the order and tell the admins, so they can refund it."""
+    o = db.one("SELECT * FROM orders WHERE id=?", (oid,))
+    if not o or o["status"] != "paid":
+        return
+    db.run("UPDATE orders SET note=TRIM(note || ' ' || ?) WHERE id=?", (f"{what} after paying. Refund if needed.", oid))
+    alert_team(db.one("SELECT * FROM orders WHERE id=?", (oid,)), "refund")
+
+
 def shop_sender():
     """The shop's own From and Reply-To, when an admin set them. Otherwise shop email goes out like any club email."""
     m = db.get_setting("shop_mail") or {}
@@ -305,6 +395,8 @@ def status_text(o):
         return "Waiting for payment"
     if o["status"] == "cancelled":
         return "Cancelled"
+    if is_event(o):
+        return "Paid"
     return "Paid, handed out" if o["picked_up_at"] else "Paid, to hand out"
 
 
@@ -325,22 +417,58 @@ def alert_team(o, kind):
     """Email the people an admin picked whenever an online order comes in or gets paid."""
     ids = set(db.get_setting("shop_notify") or [])
     # A payment for a cancelled order always needs someone, so admins get that one too.
-    people = [p for p in shop_people() if p["id"] in ids or (kind == "late" and p["role"] == "admin")]
+    people = [p for p in shop_people() if p["id"] in ids or (kind in ("late", "refund") and p["role"] == "admin")]
     if not people:
         return
-    if kind == "late":
+    if kind == "refund":
+        team_email(o, people, f"Refund check: {o['code']}", f"{o['name'] or 'Someone'} cancelled after paying {fmt(o['total'])}. "
+                   "Refund it on Venmo if needed.")
+    elif kind == "late":
         team_email(o, people, f"Payment for cancelled order {o['code']}",
                    "A Venmo payment came in for an order that was already cancelled. Refund it or fill the order.")
     elif kind == "new":
         team_email(o, people, f"New order {o['code']}: {fmt(o['total'])}", f"{o['name'] or 'Someone'} placed an order online.")
     else:
         how = "Matched from Venmo's email." if o["paid_by"] == "Venmo email" else f"Marked paid by {o['paid_by']}."
-        team_email(o, people, f"Paid: order {o['code']}", f"{o['name'] or 'An order'} is paid and ready to hand out. {how}")
+        done = "is paid." if is_event(o) else "is paid and ready to hand out."
+        team_email(o, people, f"Paid: order {o['code']}", f"{o['name'] or 'An order'} {done} {how}")
+
+
+def event_email(o, kind):
+    items = _json(o["items"], [])
+    ev = event_of(o)
+    first = (o["name"].split() or [""])[0]
+    what = ", ".join(line_text(i) for i in items)
+    rows = [("Code", o["code"]), ("For", what), ("Total", fmt(o["total"]))] + ([("Event", ev["title"])] if ev else [])
+    url = f"{mailer.site_url()}/shop/order/{o['code']}"
+    if kind == "placed":
+        when = datetime.fromisoformat(held_until(o)).strftime("%a %b %d, %I:%M %p").replace(" 0", " ")
+        h, t = mailer.render(f"Pay to hold your spot", [f"Mahalo{', ' + first if first else ''}.", ("rows", rows),
+                             f"Pay {fmt(o['total'])} with Venmo to @{venmo_handle()} and keep {o['code']} in the note. "
+                             f"We hold your spot until {when}."],
+                             button=("Pay with Venmo", pay_link(o)), footer_link=("View payment", url))
+        mailer.queue(o["email"], f"Pay to hold your spot: {o['code']}", h, t, kind="order", sender=shop_sender())
+    elif kind == "paid":
+        # The usual "you're signed up" confirmation, with the calendar file and the change/cancel link.
+        tok = (db.one("SELECT token FROM rsvps WHERE order_id=?", (o["id"],)) or
+               db.one("SELECT token FROM signups WHERE order_id=?", (o["id"],)) or {}).get("token") or store.my_token(o["email"])
+        full = db.one("SELECT * FROM events WHERE slug=?", (ev["slug"],)) if ev else None
+        extra = [("When", mailer.fmt_when(full)), ("Where", full["location"])] if full else []
+        store.confirm_email(o["email"], o["name"] or "there", tok, f"Paid and confirmed: {ev['title'] if ev else what}",
+                            [("Paid", f"{fmt(o['total'])}, {o['code']}"), ("For", what)] + extra, full)
+    elif kind in ("expired", "cancelled"):
+        lead = ("We didn't see a payment, so the spot was released. If you did pay, reply to this email and we'll sort it out."
+                if kind == "expired" else "If you already paid, reply to this email and we'll sort it out.")
+        title = "Spot released" if kind == "expired" else "Cancelled"
+        h, t = mailer.render(f"{title}: {o['code']}", [("rows", rows), lead])
+        mailer.queue(o["email"], f"{title}: {o['code']}", h, t, kind="order", sender=shop_sender())
 
 
 def order_email(o, kind):
     if not o["email"]:
         return
+    if is_event(o):
+        return event_email(o, kind)
     items = _json(o["items"], [])
     pickup = db.get_setting("shop_note") or ""
     rows = [("Order", o["code"]), ("Items", ", ".join(line_text(i) for i in items)), ("Total", fmt(o["total"]))]
@@ -379,7 +507,7 @@ def mark_paid(o, method, by_name):
     try:
         # A table sale is handed over on the spot; an online order waits for pickup.
         cur = c.execute("UPDATE orders SET status='paid', method=?, paid_at=?, paid_by=?, picked_up_at=? WHERE id=? AND status='pending'",
-                        (method, now, by_name, now if o["channel"] == "table" else None, o["id"]))
+                        (method, now, by_name, now if o["channel"] == "table" or is_event(o) else None, o["id"]))
         c.commit()
     except Exception:
         c.rollback()
@@ -408,7 +536,9 @@ def cancel(oid, note="", allow_paid=False, expired=False, reason=""):
         cur = c.execute("UPDATE orders SET status='cancelled', expired=?, note=TRIM(note || ' ' || ?) WHERE id=? AND status=?",
                         (1 if expired else 0, note, oid, o["status"]))
         done = cur.rowcount == 1
-        if done and not o["picked_up_at"]:
+        if done and is_event(o):
+            release_event(c, oid)
+        elif done and not o["picked_up_at"]:
             restock(c, _json(o["items"], []))
         c.commit()
     except Exception:
@@ -425,6 +555,8 @@ def change(o, action, user, method="", reason=""):
             raise Invalid("Only orders waiting for payment can be marked paid.")
         return done
     if action in ("picked_up", "not_picked_up"):
+        if is_event(o):
+            raise Invalid("Nothing to hand out for this one.")
         if o["status"] != "paid":
             raise Invalid("Mark it paid first.")
         db.run("UPDATE orders SET picked_up_at=? WHERE id=? AND status='paid'", (db.now_iso() if action == "picked_up" else None, o["id"]))
@@ -639,8 +771,11 @@ def _revive(o):
         if cur["status"] != "cancelled" or not cur["expired"]:  # only orders the site released, never ones a person cancelled
             c.commit()
             return False
-        reserve(c, [{"product_id": i["product_id"], "option": i["option"], "qty": i["qty"]} for i in _json(cur["items"], [])],
-                active_only=False)
+        if is_event(cur):
+            _rehold(c, cur)
+        else:
+            reserve(c, [{"product_id": i["product_id"], "option": i["option"], "qty": i["qty"]} for i in _json(cur["items"], [])],
+                    active_only=False)
         c.execute("UPDATE orders SET status='pending', expired=0 WHERE id=? AND status='cancelled'", (o["id"],))
         c.commit()
         return True
@@ -842,18 +977,22 @@ def _by_code(code):
     return o
 
 
+def _visible(o):
+    if not (enabled() or is_event(o)):
+        raise HTTPException(404)
+    return o
+
+
 @public.get("/orders/{code}")
 def order_status(code: str, request: Request):
-    _public_on()
     _throttle(request, "order-look", 120)
-    return order_out(_by_code(code))
+    return order_out(_visible(_by_code(code)))
 
 
 @public.get("/orders/{code}/qr.svg")
 def order_qr(code: str, request: Request):
-    _public_on()
     _throttle(request, "order-look", 120)
-    o = _by_code(code)
+    o = _visible(_by_code(code))
     if o["status"] != "pending" or not venmo_handle():
         raise HTTPException(404)
     from .main import qr_svg

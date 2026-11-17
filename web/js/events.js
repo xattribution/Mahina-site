@@ -1,5 +1,5 @@
 // Events: timeline, calendar, event page, sign-up sheets.
-import { h, $, $$, api, clear, go, href, icon, link, shareButton, hint, parse, time, timeRange, longDate, shortDate, monthName, weekday,
+import { h, $, $$, api, clear, go, href, icon, link, shareButton, hint, money, price, parse, time, timeRange, longDate, shortDate, monthName, weekday,
   clubNow, isoLocal, relDays, anchor, googleCal, me, toast, field, input, onSubmit, honeypot, tagChip, empty, plural, query,
   setTitle, media, CFG, modal } from "./core.js";
 import { fullMoons, moonSVG, moonInfo } from "./moon.js";
@@ -506,19 +506,25 @@ function rsvpPanel(ev) {
     const open = () => {
       let guests = 0;
       const out = h("output", "0");
+      const total = h("b.num");
+      const setTotal = () => { total.textContent = money(ev.price * (1 + guests)); };
+      const step = (d) => { guests = Math.max(0, Math.min(20, guests + d)); out.value = guests; setTotal(); };
+      setTotal();
       signupPopup({
-        title: ev.title, sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`, submit: "I'm going",
+        title: ev.title, sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`, submit: ev.price ? "Continue to payment" : "I'm going",
         fields: [h("div.row.guest-row",
           h("span.field-label", "Guests", hint("Family or friends coming with you.")),
           h("div.stepper",
-            h("button", { type: "button", "aria-label": "Fewer guests", onclick: () => { guests = Math.max(0, guests - 1); out.value = guests; } }, icon("minus", 18)),
+            h("button", { type: "button", "aria-label": "Fewer guests", onclick: () => step(-1) }, icon("minus", 18)),
             out,
-            h("button", { type: "button", "aria-label": "More guests", onclick: () => { guests = Math.min(20, guests + 1); out.value = guests; } }, icon("plus", 18))))],
+            h("button", { type: "button", "aria-label": "More guests", onclick: () => step(1) }, icon("plus", 18)))),
+          ev.price ? h("div.row.pay-total", h("span", `${price(ev.price)} per person`), total) : null],
         onSubmit: (v) => api(`/api/events/${ev.slug}/rsvp`, { method: "POST", body: { ...v, guests, status: "going" } }),
-        done: (res) => { ev.going = res.going; draw(res); },
+        done: (res) => { if (res.pay) return go(`/shop/order/${res.pay}`); ev.going = res.going; draw(res); },
       });
     };
     box.append(h("h3", "Are you coming?"),
+      ev.price ? h("p.rsvp-price", h("b", price(ev.price)), " per person") : null,
       h("p.going", icon("people", 18), ev.going ? `${ev.going} going` : "Be the first to RSVP",
         ev.capacity ? h("span", ` of ${ev.capacity}`) : null),
       h("button.btn.block", { type: "button", disabled: full, onclick: open }, full ? "Full" : "I'm going"));
@@ -629,17 +635,26 @@ function slotRow(sheet, sl, open, redraw) {
       limited && sl.left > 1 && !openChoices.length ? field("How many?", h("select", { name: "qty" }, Array.from({ length: Math.min(sl.left, 10) }, (_, i) => h("option", { value: i + 1 }, i + 1))),
         { hintText: "How many of this you're bringing or covering." }) : null].filter(Boolean);
     const when = sl.starts_at ? timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at }) : "";
+    if (sl.price) {
+      const total = h("b.num", money(sl.price));
+      const qtySel = fields.find((f) => f.querySelector?.("select[name=qty]"))?.querySelector("select");
+      qtySel?.addEventListener("change", () => { total.textContent = money(sl.price * Number(qtySel.value)); });
+      fields.push(h("div.row.pay-total", h("span", qtySel ? `${price(sl.price)} each` : "Total"), total));
+    }
+    let pay = null;
     signupPopup({
       title: sl.is_other ? "Bring something else" : sl.title,
       sub: [sheet.event?.title || sheet.title, when].filter(Boolean).join(", "),
+      submit: sl.price ? "Continue to payment" : "Sign up",
       fields,
       onSubmit: async (v) => {
         const ch = (sl.choices || []).find((c) => c.id === v.choice);
         if (ch) { v.item = ch.title; v.qty = 1; }
-        await api(`/api/slots/${sl.id}/signup`, { method: "POST", body: v });
+        pay = (await api(`/api/slots/${sl.id}/signup`, { method: "POST", body: v })).pay;
         return ch;
       },
       done: (ch, v) => {
+        if (pay) return go(`/shop/order/${pay}`);
         if (ch) { ch.taken += 1; ch.left -= 1; }
         const qty = Number(v.qty || 1), serves = Number(v.servings || 0);
         sl.taken += qty; if (limited) { sl.left -= qty; sheet.filled += qty; }
@@ -680,7 +695,7 @@ function slotRow(sheet, sl, open, redraw) {
   row.append(
     h("div.slot-row",
       sl.image ? h("div.slot-img", h("img", { src: media(sl.image.thumb), alt: "", loading: "lazy" })) : null,
-      h("div.slot-title", title, sl.starts_at ? h("small", timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : sl.note && !sl.ask_item ? h("small", sl.note) : null),
+      h("div.slot-title", title, sl.price ? h("span.slot-price", price(sl.price)) : null, sl.starts_at ? h("small", timeRange({ starts_at: sl.starts_at, ends_at: sl.ends_at })) : sl.note && !sl.ask_item ? h("small", sl.note) : null),
       h("div.slot-fill", pips, count ? h("div.slot-count", count) : null, people),
       EDIT.on ? editTools : btn),
     ...[choiceList, dishes].filter(Boolean));

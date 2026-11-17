@@ -328,6 +328,7 @@ def event_fields(body):
     if ends and ends < starts:
         raise Invalid("The end is before the start.", "ends_at")
     cap = body.get("capacity")
+    price = event_price(body.get("price"))
     reminders = sorted({int(h) for h in body.get("reminders") or [] if str(h).isdigit() and 0 < int(h) <= 336}, reverse=True)
     return {
         "title": title, "starts_at": starts, "ends_at": ends, "all_day": 1 if body.get("all_day") else 0,
@@ -340,7 +341,19 @@ def event_fields(body):
         "reminders": json.dumps(reminders),
         "donate": 1 if body.get("donate") else 0,
         "donate_note": clean(body.get("donate_note"), 120),
+        "price": price,
     }
+
+
+def event_price(v, field="price"):
+    """Dollars from the form ("15", "12.50", blank) to cents. A price needs the club's Venmo handle to collect it."""
+    if str(v if v is not None else "").strip() in ("", "0", "0.00"):
+        return 0
+    from .shop import cents, venmo_handle
+    c = cents(v, field)
+    if c and not venmo_handle():
+        raise Invalid("Add the club's Venmo handle in Settings first, so people can pay.", field)
+    return c
 
 
 @router.get("/events")
@@ -354,8 +367,11 @@ def event(eid: int, a=can("events")):
     if not ev:
         raise Invalid("Event not found.", status=404)
     out = store.event_detail(ev, admin=True)
-    out["rsvps"] = db.q("SELECT id, name, email, guests, status, created FROM rsvps WHERE event_id=? ORDER BY status, created",
+    out["rsvps"] = db.q("SELECT id, name, email, guests, status, created, order_id FROM rsvps WHERE event_id=? ORDER BY status, created",
                         (eid,))
+    pay = store.order_states([r["order_id"] for r in out["rsvps"]])
+    for r in out["rsvps"]:
+        r["pay"] = pay.get(r.pop("order_id"))
     out["people"] = event_people(eid)
     return out
 
@@ -379,18 +395,22 @@ def event_people(eid):
     Same email (ignoring case, +tags, and Gmail dots) is the same person. Otherwise a full name that appears exactly
     once on each side is matched too, and marked so planners can see it was matched by name."""
     people = {}
-    for r in db.q("SELECT name, email, guests, status FROM rsvps WHERE event_id=? ORDER BY created", (eid,)):
+    rr = db.q("SELECT name, email, guests, status, order_id FROM rsvps WHERE event_id=? ORDER BY created", (eid,))
+    uu = db.q("""SELECT u.name, u.email, u.item, u.qty, u.order_id, sl.title slot, sh.title sheet FROM signups u
+                 JOIN slots sl ON sl.id=u.slot_id JOIN sheets sh ON sh.id=sl.sheet_id
+                 WHERE sh.event_id=? ORDER BY sh.sort, sl.sort, u.created""", (eid,))
+    pay = store.order_states([x["order_id"] for x in rr + uu])
+    for r in rr:
         p = people.setdefault(_email_key(r["email"]), {"name": r["name"], "emails": [], "rsvp": None, "signups": [], "match": None})
         p["emails"].append(r["email"])
-        p["rsvp"] = {"status": r["status"], "guests": r["guests"] or 0}
-    for u in db.q("""SELECT u.name, u.email, u.item, u.qty, sl.title slot, sh.title sheet FROM signups u
-                     JOIN slots sl ON sl.id=u.slot_id JOIN sheets sh ON sh.id=sl.sheet_id
-                     WHERE sh.event_id=? ORDER BY sh.sort, sl.sort, u.created""", (eid,)):
+        p["rsvp"] = {"status": r["status"], "guests": r["guests"] or 0, "pay": (pay.get(r["order_id"]) or {}).get("status")}
+    for u in uu:
         k = _email_key(u["email"])
         p = people.setdefault(k, {"name": u["name"], "emails": [], "rsvp": None, "signups": [], "match": None})
         if u["email"].lower() not in (e.lower() for e in p["emails"]):
             p["emails"].append(u["email"])
-        p["signups"].append({"slot": u["slot"], "sheet": u["sheet"], "item": u["item"] or "", "qty": u["qty"] or 1})
+        p["signups"].append({"slot": u["slot"], "sheet": u["sheet"], "item": u["item"] or "", "qty": u["qty"] or 1,
+                             "pay": (pay.get(u["order_id"]) or {}).get("status")})
     # Name matching between people who are only on one list.
     only_r = [k for k, p in people.items() if p["rsvp"] and not p["signups"]]
     only_s = [k for k, p in people.items() if p["signups"] and not p["rsvp"]]
@@ -465,6 +485,7 @@ def event_patch(eid: int, body: dict = Body(...), a=can("events")):
         raise Invalid("Event not found.", status=404)
     merged = dict(old)
     merged["reminders"] = json.loads(old["reminders"] or "[]")
+    merged["price"] = f"{(old.get('price') or 0) / 100:.2f}"  # stored in cents; event_fields reads dollars
     merged.update({k: body[k] for k in EVENT_PATCHABLE if k in body})
     f = event_fields(merged)
     f["slug"] = old["slug"]
@@ -511,15 +532,30 @@ def event_duplicate(eid: int, a=can("events")):
         sid = db.run("INSERT INTO sheets(event_id, title, description, status, show_names, allow_other, sort, created) VALUES (?,?,?,?,?,?,?,?)",
                      (new, s["title"], s["description"], s["status"], s["show_names"], s["allow_other"], s["sort"], db.now_iso()))
         for sl in db.q("SELECT * FROM slots WHERE sheet_id=?", (s["id"],)):
-            db.run("INSERT INTO slots(sheet_id, title, note, capacity, ask_item, ask_servings, photo_id, is_other, choices, sort) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                   (sid, sl["title"], sl["note"], sl["capacity"], sl["ask_item"], sl["ask_servings"], sl["photo_id"], sl["is_other"], sl["choices"], sl["sort"]))
+            db.run("INSERT INTO slots(sheet_id, title, note, capacity, ask_item, ask_servings, photo_id, is_other, choices, sort, price) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                   (sid, sl["title"], sl["note"], sl["capacity"], sl["ask_item"], sl["ask_servings"], sl["photo_id"], sl["is_other"], sl["choices"], sl["sort"],
+                    sl.get("price") or 0))
     audit(a, "Duplicated event", ev["title"])
     return {"id": new}
+
+
+def drop_holds(sql, args, who):
+    """Before the team deletes RSVPs or sign-ups: cancel their unpaid payments, so a late payment can't confirm a spot
+    that's gone. Paid ones get a refund note for the admins."""
+    from . import shop
+    for r in db.q(sql, args):
+        o = db.one("SELECT * FROM orders WHERE id=?", (r["order_id"],)) if r.get("order_id") else None
+        if o and o["status"] == "pending":
+            shop.cancel(o["id"], f"Removed by {who['name']}.")
+        elif o and o["status"] == "paid":
+            shop.flag_refund(o["id"], f"Removed by {who['name']}")
 
 
 @router.delete("/events/{eid}")
 def event_delete(eid: int, a=can("events")):
     audit(a, "Deleted event", title_of("events", eid))
+    drop_holds("SELECT order_id FROM rsvps WHERE event_id=? UNION ALL SELECT sg.order_id FROM signups sg JOIN slots sl ON sl.id=sg.slot_id "
+               "JOIN sheets sh ON sh.id=sl.sheet_id WHERE sh.event_id=?", (eid, eid), a)
     db.run("DELETE FROM events WHERE id=?", (eid,))
     return {"ok": True}
 
@@ -529,6 +565,7 @@ def rsvp_delete(rid: int, a=can("events")):
     r = db.one("SELECT r.name, e.title FROM rsvps r JOIN events e ON e.id=r.event_id WHERE r.id=?", (rid,))
     if r:
         audit(a, "Removed an RSVP", f"{r['name']}, {r['title']}")
+    drop_holds("SELECT order_id FROM rsvps WHERE id=?", (rid,), a)
     db.run("DELETE FROM rsvps WHERE id=?", (rid,))
     return {"ok": True}
 
@@ -590,15 +627,17 @@ def save_slots(sid, slots):
         photo = int(photo) if str(photo or "").isdigit() and db.one("SELECT 1 FROM photos WHERE id=?", (int(photo),)) else None
         existing = db.one("SELECT * FROM slots WHERE id=? AND sheet_id=? AND is_other=0", (sl["id"], sid)) if sl.get("id") else None
         choices = json.dumps(store.clean_choices(sl.get("choices"), store.slot_choices(existing) if existing else None))
+        # Price stays as it was when the form doesn't send one (older clients).
+        price = event_price(sl["price"], "slots") if "price" in sl else (existing.get("price") or 0 if existing else 0)
         vals = (title, clean(sl.get("note"), 200), cap, clean(sl.get("starts_at"), 16) or None,
-                clean(sl.get("ends_at"), 16) or None, 1 if sl.get("ask_item") else 0, 1 if sl.get("ask_servings") else 0, photo, choices, i)
+                clean(sl.get("ends_at"), 16) or None, 1 if sl.get("ask_item") else 0, 1 if sl.get("ask_servings") else 0, photo, choices, price, i)
         if existing:
-            db.run("UPDATE slots SET title=?, note=?, capacity=?, starts_at=?, ends_at=?, ask_item=?, ask_servings=?, photo_id=?, choices=?, sort=? "
+            db.run("UPDATE slots SET title=?, note=?, capacity=?, starts_at=?, ends_at=?, ask_item=?, ask_servings=?, photo_id=?, choices=?, price=?, sort=? "
                    "WHERE id=?", vals + (sl["id"],))
             keep.append(int(sl["id"]))
         else:
-            keep.append(db.run("INSERT INTO slots(title, note, capacity, starts_at, ends_at, ask_item, ask_servings, photo_id, choices, sort, sheet_id) "
-                               "VALUES (?,?,?,?,?,?,?,?,?,?,?)", vals + (sid,)))
+            keep.append(db.run("INSERT INTO slots(title, note, capacity, starts_at, ends_at, ask_item, ask_servings, photo_id, choices, price, sort, sheet_id) "
+                               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", vals + (sid,)))
     marks = ",".join("?" * len(keep)) or "NULL"
     db.run(f"DELETE FROM slots WHERE sheet_id=? AND is_other=0 AND id NOT IN ({marks})", (sid, *keep))
 
@@ -635,6 +674,7 @@ def sheet_update(sid: int, body: dict = Body(...), a=can("signups", "events")):
 @router.delete("/sheets/{sid}")
 def sheet_delete(sid: int, a=can("signups", "events")):
     audit(a, "Deleted sign-up", title_of("sheets", sid))
+    drop_holds("SELECT sg.order_id FROM signups sg JOIN slots sl ON sl.id=sg.slot_id WHERE sl.sheet_id=?", (sid,), a)
     db.run("DELETE FROM sheets WHERE id=?", (sid,))
     return {"ok": True}
 
@@ -707,6 +747,7 @@ def signup_delete(uid: int, a=can("signups", "events")):
     r = db.one("SELECT sg.name, sl.title FROM signups sg JOIN slots sl ON sl.id=sg.slot_id WHERE sg.id=?", (uid,))
     if r:
         audit(a, "Removed a sign-up", f"{r['name']}, {r['title']}")
+    drop_holds("SELECT order_id FROM signups WHERE id=?", (uid,), a)
     db.run("DELETE FROM signups WHERE id=?", (uid,))
     return {"ok": True}
 
@@ -715,7 +756,7 @@ def signup_delete(uid: int, a=can("signups", "events")):
 def signup_add(slot_id: int, body: dict = Body(...), a=can("signups", "events")):
     member_mail_budget(a)
     # Signing someone up by hand never adds them to the club news list; that's their choice to make.
-    out = store.signup(slot_id, {**body, "news": False})
+    out = store.signup(slot_id, {**body, "news": False}, by_team=True)
     audit(a, "Signed someone up", f"{store.need_name(body.get('name'))}, {title_of('slots', slot_id)}")
     return out
 

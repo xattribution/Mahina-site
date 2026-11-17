@@ -415,6 +415,10 @@ export function copy(text) {
 }
 
 // ---------- share ----------
+export const money = (c) => "$" + (c / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Whole dollars drop the cents: $15, $12.50.
+export const price = (c) => c % 100 ? money(c) : "$" + (c / 100).toLocaleString("en-US");
+
 export function shareUrl(path) {
   return (window.SITE?.site_url || location.origin + BASE) + (path === "/" ? "" : path);
 }

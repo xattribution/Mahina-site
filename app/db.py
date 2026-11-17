@@ -256,6 +256,13 @@ ADDED_COLUMNS = [
     ("plan_items", "parent_id", "INTEGER"),  # a step inside a task (one level deep)
     ("orders", "ip_key", "TEXT DEFAULT ''"),     # a one-way hash of the buyer's network, only to cap unpaid holds
     ("orders", "expired", "INTEGER DEFAULT 0"),  # released for non-payment (not cancelled by a person)
+    # Paid events: a price per person for RSVPs and per spot for sign-up slots (cents, 0 = free). A paid RSVP or
+    # sign-up is held by an order (kind 'event') and released if it isn't paid in time.
+    ("events", "price", "INTEGER DEFAULT 0"),
+    ("slots", "price", "INTEGER DEFAULT 0"),
+    ("orders", "kind", "TEXT DEFAULT 'shop'"),
+    ("rsvps", "order_id", "INTEGER"),
+    ("signups", "order_id", "INTEGER"),
 ]
 
 
