@@ -94,8 +94,8 @@
     if ((m = path.match(/^\/api\/events\/([^/]+)\/rsvp$/))) {
       who(body);
       const ev = D[`/api/events/${m[1]}`];
-      const guests = Number(body.guests || 0);
-      ev.going += 1 + guests;
+      const guests = Number(body.guests || 0), kids = Number(body.kids || 0);
+      ev.going += 1 + guests + kids;
       const row = D["/api/events"].find((x) => x.slug === m[1]);
       if (row) row.going = ev.going;
       Object.assign(mine, { name: body.name, email: body.email });

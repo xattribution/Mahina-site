@@ -344,7 +344,7 @@ def email_for_token(tok):
 def me(tok: str):
     email = email_for_token(tok)
     now = db.now_iso()
-    rs = db.q("""SELECT r.id, r.status, r.guests, r.name, r.order_id, e.slug, e.title, e.starts_at, e.location FROM rsvps r
+    rs = db.q("""SELECT r.id, r.status, r.guests, r.kids, r.name, r.order_id, e.slug, e.title, e.starts_at, e.location FROM rsvps r
                  JOIN events e ON e.id=r.event_id WHERE lower(r.email)=? AND e.starts_at > ? ORDER BY e.starts_at""",
               (email, now))
     sg = db.q("""SELECT sg.id, sg.qty, sg.item, sg.name, sg.order_id, sl.title slot, sl.starts_at slot_start, sh.title sheet,

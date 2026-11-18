@@ -322,7 +322,7 @@ def open_order_check(c, email, ip):
     return nk
 
 
-def hold_order(c, line, name, email, ip):
+def hold_order(c, lines, name, email, ip):
     """Inside the caller's write lock: open an unpaid event order for one RSVP or sign-up. Returns (order id, code)."""
     if not venmo_handle():
         raise Invalid("Payments aren't set up yet. Contact us to sign up.")
@@ -330,7 +330,7 @@ def hold_order(c, line, name, email, ip):
     code = new_code(c)
     oid = c.execute("INSERT INTO orders(code, name, email, items, total, status, method, channel, created, ip_key, kind) "
                     "VALUES (?,?,?,?,?,'pending','','online',?,?,'event')",
-                    (code, name, email, json.dumps([line]), line["price"] * line["qty"], db.now_iso(), nk)).lastrowid
+                    (code, name, email, json.dumps(lines), sum(ln["price"] * ln["qty"] for ln in lines), db.now_iso(), nk)).lastrowid
     return oid, code
 
 
@@ -350,12 +350,13 @@ def _rehold(c, o):
                 raise Invalid("gone")
             if c.execute("SELECT 1 FROM rsvps WHERE event_id=? AND lower(email)=?", (ev["id"], o["email"])).fetchone():
                 raise Invalid("already")
-            going = c.execute("SELECT COUNT(*) + COALESCE(SUM(guests),0) FROM rsvps WHERE event_id=? AND status='going'", (ev["id"],)).fetchone()[0]
-            if ev["capacity"] and going + ln["qty"] > ev["capacity"]:
+            going = c.execute("SELECT COUNT(*) + COALESCE(SUM(guests),0) + COALESCE(SUM(kids),0) FROM rsvps WHERE event_id=? AND status='going'", (ev["id"],)).fetchone()[0]
+            guests, kids = d.get("guests", ln["qty"] - 1), d.get("kids", 0)
+            if ev["capacity"] and going + 1 + guests + kids > ev["capacity"]:
                 raise Invalid("full")
-            c.execute("INSERT INTO rsvps(event_id, name, email, guests, status, reminders, news, token, created, order_id) "
-                      "VALUES (?,?,?,?,'going',?,?,?,?,?)", (ev["id"], o["name"], o["email"], ln["qty"] - 1, d.get("reminders", 1),
-                                                             d.get("news"), store.my_token(o["email"]), db.now_iso(), o["id"]))
+            c.execute("INSERT INTO rsvps(event_id, name, email, guests, kids, status, reminders, news, token, created, order_id) "
+                      "VALUES (?,?,?,?,?,'going',?,?,?,?,?)", (ev["id"], o["name"], o["email"], guests, kids, d.get("reminders", 1),
+                                                               d.get("news"), store.my_token(o["email"]), db.now_iso(), o["id"]))
         elif ln.get("slot_id"):
             sl = c.execute("SELECT * FROM slots WHERE id=?", (ln["slot_id"],)).fetchone()
             if not sl:

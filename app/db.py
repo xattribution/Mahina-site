@@ -266,6 +266,9 @@ ADDED_COLUMNS = [
     # The buyer tapped "I've paid": the hold stops expiring and the team checks Venmo and marks it paid.
     # This is what makes payments work without the Gmail matching.
     ("orders", "claimed_at", "TEXT"),
+    # Kids on an RSVP, counted apart from adult guests. kid_price: NULL = same as adults, 0 = free.
+    ("rsvps", "kids", "INTEGER DEFAULT 0"),
+    ("events", "kid_price", "INTEGER"),
 ]
 
 

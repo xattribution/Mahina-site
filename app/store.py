@@ -100,8 +100,17 @@ def all_tags():
 # ---------- events ----------
 
 def going_count(event_id):
-    r = db.one("SELECT COUNT(*) n, COALESCE(SUM(guests),0) g FROM rsvps WHERE event_id=? AND status='going'", (event_id,))
-    return r["n"] + r["g"]
+    r = db.one("SELECT COUNT(*) n, COALESCE(SUM(guests),0) g, COALESCE(SUM(kids),0) k FROM rsvps WHERE event_id=? AND status='going'", (event_id,))
+    return r["n"] + r["g"] + r["k"]
+
+
+def kid_price(ev):
+    """What a kid costs at this event: the adult price unless the organizer set kids apart (0 = free)."""
+    return ev["price"] or 0 if ev.get("kid_price") is None else ev["kid_price"]
+
+
+def rsvp_total(ev, guests, kids):
+    return (ev.get("price") or 0) * (1 + guests) + kid_price(ev) * kids
 
 
 def events_out(rows, admin=False):
@@ -127,6 +136,7 @@ def events_out(rows, admin=False):
                                "status", "capacity")}
         e["all_day"] = bool(r["all_day"])
         e["price"] = r.get("price") or 0
+        e["kid_price"] = kid_price(r)
         e["rsvp_enabled"] = bool(r["rsvp_enabled"])
         e["tags"] = tags.get(r["id"], [])
         e["cover"] = covers.get(r.get("cover_photo_id"))
@@ -344,7 +354,7 @@ def signup(slot_id, body, by_team=False, ip=None):
                     "qty": qty, "price": price,
                     "data": {"phone": clean(body.get("phone"), 30), "item": item, "servings": servings,
                              "choice_id": choice["id"] if choice else None, "reminders": reminders, "news": news}}
-            oid, code = shop.hold_order(c, line, name, email, ip)
+            oid, code = shop.hold_order(c, [line], name, email, ip)
         sid = c.execute("INSERT INTO signups(slot_id, name, email, phone, qty, item, servings, choice_id, reminders, news, token, created, order_id) "
                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (slot_id, name, email, clean(body.get("phone"), 30), qty, item, servings,
                                                                 choice["id"] if choice else None, reminders, news, tok, db.now_iso(), oid)).lastrowid
@@ -395,11 +405,12 @@ def rsvp(ev, body, ip=None):
         raise Invalid("This event has already started.")
     name, email = need_name(body.get("name")), need_email(body.get("email"))
     guests = max(0, min(int(body.get("guests") or 0), 20))
+    kids = max(0, min(int(body.get("kids") or 0), 20))
     status = body.get("status") if body.get("status") in ("going", "maybe", "no") else "going"
     existing = db.one("SELECT * FROM rsvps WHERE event_id=? AND lower(email)=?", (ev["id"], email))
     if status == "going" and ev["capacity"]:
-        current = going_count(ev["id"]) - ((1 + existing["guests"]) if existing and existing["status"] == "going" else 0)
-        if current + 1 + guests > ev["capacity"]:
+        current = going_count(ev["id"]) - ((1 + existing["guests"] + (existing.get("kids") or 0)) if existing and existing["status"] == "going" else 0)
+        if current + 1 + guests + kids > ev["capacity"]:
             left = ev["capacity"] - current
             raise Invalid("This event is full." if left <= 0 else f"Only {left} spots left.", "guests")
     if existing:
@@ -414,23 +425,28 @@ def rsvp(ev, body, ip=None):
         return {"status": existing["status"], "already": True, "going": going_count(ev["id"])}
     tok = existing["token"] if existing else my_token(email)
     reminders, news = email_prefs(body)
-    if status == "going" and (ev.get("price") or 0) > 0:
-        return paid_rsvp(ev, name, email, guests, reminders, news, tok, ip)
+    if status == "going" and rsvp_total(ev, guests, kids) > 0:
+        return paid_rsvp(ev, name, email, guests, kids, reminders, news, tok, ip)
     if existing:
-        db.run("UPDATE rsvps SET status=?, guests=?, reminders=?, news=? WHERE id=?", (status, guests, reminders, news, existing["id"]))
+        db.run("UPDATE rsvps SET status=?, guests=?, kids=?, reminders=?, news=? WHERE id=?", (status, guests, kids, reminders, news, existing["id"]))
     else:
-        db.run("INSERT INTO rsvps(event_id, name, email, guests, status, reminders, news, token, created) VALUES (?,?,?,?,?,?,?,?,?)",
-               (ev["id"], name, email, guests, status, reminders, news, tok, db.now_iso()))
+        db.run("INSERT INTO rsvps(event_id, name, email, guests, kids, status, reminders, news, token, created) VALUES (?,?,?,?,?,?,?,?,?,?)",
+               (ev["id"], name, email, guests, kids, status, reminders, news, tok, db.now_iso()))
     if news:
         subscribe(email, name, "rsvp")
     if status == "going":
-        rows = [("When", mailer.fmt_when(ev)), ("Where", ev["location"]),
-                ("Guests", f"You + {guests}" if guests else "")]
+        rows = [("When", mailer.fmt_when(ev)), ("Where", ev["location"]), ("Coming", party(guests, kids))]
         confirm_email(email, name, tok, f"You're going to {ev['title']}", rows, ev)
     return {"status": status, "going": going_count(ev["id"])}
 
 
-def paid_rsvp(ev, name, email, guests, reminders, news, tok, ip):
+def party(guests, kids):
+    """"You + 2 adults + 1 kid", or "" when it's just them."""
+    bits = ([f"{guests} {'adult' if guests == 1 else 'adults'}"] if guests else []) + ([f"{kids} {'kid' if kids == 1 else 'kids'}"] if kids else [])
+    return "You + " + " + ".join(bits) if bits else ""
+
+
+def paid_rsvp(ev, name, email, guests, kids, reminders, news, tok, ip):
     """A paid event: hold the spot with an unpaid order. The usual confirmation goes out once it's paid."""
     from . import shop
     c = _locked()
@@ -438,16 +454,19 @@ def paid_rsvp(ev, name, email, guests, reminders, news, tok, ip):
         if c.execute("SELECT 1 FROM rsvps WHERE event_id=? AND lower(email)=?", (ev["id"], email)).fetchone():
             raise Invalid("You already have an RSVP for this event. Check your email for the link to change it.")
         if ev["capacity"]:
-            going = c.execute("SELECT COUNT(*) + COALESCE(SUM(guests),0) FROM rsvps WHERE event_id=? AND status='going'",
+            going = c.execute("SELECT COUNT(*) + COALESCE(SUM(guests),0) + COALESCE(SUM(kids),0) FROM rsvps WHERE event_id=? AND status='going'",
                               (ev["id"],)).fetchone()[0]
-            if going + 1 + guests > ev["capacity"]:
+            if going + 1 + guests + kids > ev["capacity"]:
                 left = ev["capacity"] - going
                 raise Invalid("This event is full." if left <= 0 else f"Only {left} spots left.", "guests")
-        line = {"event_id": ev["id"], "name": f"RSVP: {ev['title']}", "option": "", "qty": 1 + guests, "price": ev["price"],
-                "data": {"reminders": reminders, "news": news}}
-        oid, code = shop.hold_order(c, line, name, email, ip)
-        c.execute("INSERT INTO rsvps(event_id, name, email, guests, status, reminders, news, token, created, order_id) "
-                  "VALUES (?,?,?,?,'going',?,?,?,?,?)", (ev["id"], name, email, guests, reminders, news, tok, db.now_iso(), oid))
+        # One line for the adults and, when kids come along, one for the kids (shown even when they're free).
+        lines = [{"event_id": ev["id"], "name": f"{'Adults' if kids else 'RSVP'}: {ev['title']}", "option": "", "qty": 1 + guests,
+                  "price": ev["price"] or 0, "data": {"reminders": reminders, "news": news, "guests": guests, "kids": kids}}]
+        if kids:
+            lines.append({"name": f"Kids: {ev['title']}", "option": "", "qty": kids, "price": kid_price(ev)})
+        oid, code = shop.hold_order(c, lines, name, email, ip)
+        c.execute("INSERT INTO rsvps(event_id, name, email, guests, kids, status, reminders, news, token, created, order_id) "
+                  "VALUES (?,?,?,?,?,'going',?,?,?,?,?)", (ev["id"], name, email, guests, kids, reminders, news, tok, db.now_iso(), oid))
         c.commit()
     except Exception:
         c.rollback()

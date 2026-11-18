@@ -972,8 +972,7 @@ body.has-edit-bar .cart-bar { bottom: calc(86px + env(safe-area-inset-bottom, 0p
 .foot-share:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
 
 /* paid events */
-.rsvp-price { margin: 6px 0 0; color: var(--muted); }
-.rsvp-price b { color: var(--ink); font-size: 18px; }
+.rsvp-price { margin: 6px 0 0; color: var(--ink); font-weight: 650; }
 .pay-total { justify-content: space-between; align-items: baseline; padding: 12px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .pay-total b { font-size: 20px; color: var(--ink); }
 .slot-price { margin-left: 8px; font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }

@@ -503,28 +503,38 @@ function rsvpPanel(ev) {
       return;
     }
     const full = ev.capacity && ev.spots_left <= 0;
+    const kidPrice = ev.kid_price ?? ev.price;
+    const priceText = !ev.price && !kidPrice ? "" : kidPrice === ev.price ? `${price(ev.price)} per person`
+      : `${ev.price ? `${price(ev.price)} per adult` : "Adults free"}, ${kidPrice ? `${price(kidPrice)} per kid` : "kids free"}`;
     const open = () => {
-      let guests = 0;
-      const out = h("output", "0");
+      const n = { guests: 0, kids: 0 };
       const total = h("b.num");
-      const setTotal = () => { total.textContent = money(ev.price * (1 + guests)); };
-      const step = (d) => { guests = Math.max(0, Math.min(20, guests + d)); out.value = guests; setTotal(); };
-      setTotal();
-      signupPopup({
-        title: ev.title, sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`, submit: ev.price ? "Continue to payment" : "I'm going",
-        fields: [h("div.row.guest-row",
-          h("span.field-label", "Guests", hint("Family or friends coming with you.")),
+      const sum = () => ev.price * (1 + n.guests) + kidPrice * n.kids;
+      const counter = (key, label, help) => {
+        const out = h("output", "0");
+        const step = (d) => {
+          n[key] = Math.max(0, Math.min(20, n[key] + d)); out.value = n[key]; total.textContent = money(sum());
+          const btn = $("dialog[open] button[type=submit]");
+          if (btn && priceText) btn.textContent = sum() ? "Continue to payment" : "I'm going";
+        };
+        return h("div.row.guest-row",
+          h("span.field-label", label, help ? hint(help) : null),
           h("div.stepper",
-            h("button", { type: "button", "aria-label": "Fewer guests", onclick: () => step(-1) }, icon("minus", 18)),
+            h("button", { type: "button", "aria-label": `Fewer ${label.toLowerCase()}`, onclick: () => step(-1) }, icon("minus", 18)),
             out,
-            h("button", { type: "button", "aria-label": "More guests", onclick: () => step(1) }, icon("plus", 18)))),
-          ev.price ? h("div.row.pay-total", h("span", `${price(ev.price)} per person`), total) : null],
-        onSubmit: (v) => api(`/api/events/${ev.slug}/rsvp`, { method: "POST", body: { ...v, guests, status: "going" } }),
+            h("button", { type: "button", "aria-label": `More ${label.toLowerCase()}`, onclick: () => step(1) }, icon("plus", 18))));
+      };
+      total.textContent = money(sum());
+      signupPopup({
+        title: ev.title, sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`, submit: sum() ? "Continue to payment" : "I'm going",
+        fields: [counter("guests", "Adult guests", "Family or friends coming with you."), counter("kids", "Kids"),
+          priceText ? h("div.row.pay-total", h("span", priceText), total) : null],
+        onSubmit: (v) => api(`/api/events/${ev.slug}/rsvp`, { method: "POST", body: { ...v, ...n, status: "going" } }),
         done: (res) => { if (res.pay) return go(`/shop/order/${res.pay}`); ev.going = res.going; draw(res); },
       });
     };
     box.append(h("h3", "Are you coming?"),
-      ev.price ? h("p.rsvp-price", h("b", price(ev.price)), " per person") : null,
+      priceText ? h("p.rsvp-price", priceText) : null,
       h("p.going", icon("people", 18), ev.going ? `${ev.going} going` : "Be the first to RSVP",
         ev.capacity ? h("span", ` of ${ev.capacity}`) : null),
       h("button.btn.block", { type: "button", disabled: full, onclick: open }, full ? "Full" : "I'm going"));

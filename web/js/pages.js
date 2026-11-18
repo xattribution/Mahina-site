@@ -581,7 +581,7 @@ export async function mine({ token }) {
   const list = h("div.mine");
   const rows = [
     ...data.rsvps.filter((r) => r.status !== "no").map((r) => ({ kind: "rsvp", id: r.id, at: r.starts_at, title: r.title, slug: r.slug,
-      sub: `${longDate(parse(r.starts_at))}, ${time(parse(r.starts_at))}` + (r.guests ? `, you + ${r.guests}` : "") + (r.status === "maybe" ? ", maybe" : ""), what: "RSVP", pay: r.pay })),
+      sub: `${longDate(parse(r.starts_at))}, ${time(parse(r.starts_at))}` + (r.guests || r.kids ? `, you + ${[r.guests ? plural(r.guests, "adult") : "", r.kids ? plural(r.kids, "kid") : ""].filter(Boolean).join(" + ")}` : "") + (r.status === "maybe" ? ", maybe" : ""), what: "RSVP", pay: r.pay })),
     ...data.signups.map((s) => ({ kind: "signup", id: s.id, at: s.starts_at || s.slot_start || "", title: `${s.slot}${s.item ? ": " + s.item : ""}`, slug: s.slug,
       sub: [s.event || s.sheet, s.starts_at ? longDate(parse(s.starts_at)) : null].filter(Boolean).join(", "), what: "Sign-up", pay: s.pay })),
   ].sort((a, b) => (a.at || "").localeCompare(b.at || ""));

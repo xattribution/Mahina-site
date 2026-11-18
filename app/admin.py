@@ -329,6 +329,8 @@ def event_fields(body):
         raise Invalid("The end is before the start.", "ends_at")
     cap = body.get("capacity")
     price = event_price(body.get("price"))
+    kp = body.get("kid_price")
+    kid_price = None if str(kp if kp is not None else "").strip() == "" else event_price(kp, "kid_price")
     reminders = sorted({int(h) for h in body.get("reminders") or [] if str(h).isdigit() and 0 < int(h) <= 336}, reverse=True)
     return {
         "title": title, "starts_at": starts, "ends_at": ends, "all_day": 1 if body.get("all_day") else 0,
@@ -342,6 +344,7 @@ def event_fields(body):
         "donate": 1 if body.get("donate") else 0,
         "donate_note": clean(body.get("donate_note"), 120),
         "price": price,
+        "kid_price": kid_price,
     }
 
 
@@ -367,7 +370,8 @@ def event(eid: int, a=can("events")):
     if not ev:
         raise Invalid("Event not found.", status=404)
     out = store.event_detail(ev, admin=True)
-    out["rsvps"] = db.q("SELECT id, name, email, guests, status, created, order_id FROM rsvps WHERE event_id=? ORDER BY status, created",
+    out["kid_price_set"] = ev.get("kid_price")  # None = same as adults (the editor shows it blank)
+    out["rsvps"] = db.q("SELECT id, name, email, guests, kids, status, created, order_id FROM rsvps WHERE event_id=? ORDER BY status, created",
                         (eid,))
     pay = store.order_states([r["order_id"] for r in out["rsvps"]])
     for r in out["rsvps"]:
@@ -395,7 +399,7 @@ def event_people(eid):
     Same email (ignoring case, +tags, and Gmail dots) is the same person. Otherwise a full name that appears exactly
     once on each side is matched too, and marked so planners can see it was matched by name."""
     people = {}
-    rr = db.q("SELECT name, email, guests, status, order_id FROM rsvps WHERE event_id=? ORDER BY created", (eid,))
+    rr = db.q("SELECT name, email, guests, kids, status, order_id FROM rsvps WHERE event_id=? ORDER BY created", (eid,))
     uu = db.q("""SELECT u.name, u.email, u.item, u.qty, u.order_id, sl.title slot, sh.title sheet FROM signups u
                  JOIN slots sl ON sl.id=u.slot_id JOIN sheets sh ON sh.id=sl.sheet_id
                  WHERE sh.event_id=? ORDER BY sh.sort, sl.sort, u.created""", (eid,))
@@ -403,7 +407,7 @@ def event_people(eid):
     for r in rr:
         p = people.setdefault(_email_key(r["email"]), {"name": r["name"], "emails": [], "rsvp": None, "signups": [], "match": None})
         p["emails"].append(r["email"])
-        p["rsvp"] = {"status": r["status"], "guests": r["guests"] or 0, "pay": (pay.get(r["order_id"]) or {}).get("status")}
+        p["rsvp"] = {"status": r["status"], "guests": r["guests"] or 0, "kids": r["kids"] or 0, "pay": (pay.get(r["order_id"]) or {}).get("status")}
     for u in uu:
         k = _email_key(u["email"])
         p = people.setdefault(k, {"name": u["name"], "emails": [], "rsvp": None, "signups": [], "match": None})
@@ -486,6 +490,7 @@ def event_patch(eid: int, body: dict = Body(...), a=can("events")):
     merged = dict(old)
     merged["reminders"] = json.loads(old["reminders"] or "[]")
     merged["price"] = f"{(old.get('price') or 0) / 100:.2f}"  # stored in cents; event_fields reads dollars
+    merged["kid_price"] = "" if old.get("kid_price") is None else f"{old['kid_price'] / 100:.2f}"
     merged.update({k: body[k] for k in EVENT_PATCHABLE if k in body})
     f = event_fields(merged)
     f["slug"] = old["slug"]
@@ -591,12 +596,12 @@ def event_export(eid: int, a=can("events")):
     if not ev:
         raise Invalid("Event not found.", status=404)
     audit(a, "Downloaded roster", ev["title"])
-    rows = [["RSVP", r["name"], r["email"], r["status"], r["guests"], "", "", r["created"]]
+    rows = [["RSVP", r["name"], r["email"], r["status"], r["guests"], r["kids"] or 0, "", "", r["created"]]
             for r in db.q("SELECT * FROM rsvps WHERE event_id=? ORDER BY created", (eid,))]
-    rows += [["Sign-up", r["name"], r["email"], "", r["qty"], f"{r['sheet']}: {r['slot']}", r["item"], r["created"]]
+    rows += [["Sign-up", r["name"], r["email"], "", r["qty"], "", f"{r['sheet']}: {r['slot']}", r["item"], r["created"]]
              for r in db.q("""SELECT sg.*, sl.title slot, sh.title sheet FROM signups sg JOIN slots sl ON sl.id=sg.slot_id
                              JOIN sheets sh ON sh.id=sl.sheet_id WHERE sh.event_id=? ORDER BY sh.id, sl.sort""", (eid,))]
-    return csv_response(f"{ev['slug']}-roster.csv", ["Type", "Name", "Email", "RSVP", "Guests/Qty", "Slot", "Bringing", "When"], rows)
+    return csv_response(f"{ev['slug']}-roster.csv", ["Type", "Name", "Email", "RSVP", "Guests/Qty", "Kids", "Slot", "Bringing", "When"], rows)
 
 
 # ---------- sign-up sheets ----------
@@ -1752,8 +1757,7 @@ def plan_board(eid: int, a=can("planning", "events")):
     items = [plan_item_out(i) for i in db.q(ITEMS_SQL + " WHERE i.event_id=? ORDER BY i.kind, i.done, i.sort, i.id", (eid,))]
     notes = db.q("SELECT n.id, n.author_id, COALESCE(ad.name, n.author) author, n.body, n.created FROM plan_notes n "
                  "LEFT JOIN admins ad ON ad.id=n.author_id WHERE n.event_id=? ORDER BY n.id DESC", (eid,))
-    going = db.one("SELECT COUNT(*) n, COALESCE(SUM(guests),0) g FROM rsvps WHERE event_id=? AND status='going'", (eid,))
-    ev["going"] = going["n"] + going["g"]
+    ev["going"] = store.going_count(eid)
     return {"event": ev, "items": items, "notes": notes, "totals": plan_totals(items), "team": team(a)}
 
 

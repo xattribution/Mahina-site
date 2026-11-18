@@ -394,7 +394,7 @@ function eventForm(ev, allTags) {
     const starts_at = `${v.date}T${v.all_day ? "00:00" : v.start || "00:00"}`;
     const ends_at = v.end && !v.all_day ? `${v.date}T${v.end}` : (v.all_day ? `${v.date}T23:59` : "");
     const body = { ...v, starts_at, ends_at, status: st.status, tag_ids: [...st.tags], cover_photo_id: st.cover_id, reminders: [...st.reminders],
-      rsvp_enabled: $("[name=rsvp_enabled]", panel).checked, capacity: $("[name=capacity]", panel).value, price: $("[name=price]", panel).value,
+      rsvp_enabled: $("[name=rsvp_enabled]", panel).checked, capacity: $("[name=capacity]", panel).value, price: $("[name=price]", panel).value, kid_price: $("[name=kid_price]", panel).value,
       donate: $("[name=donate]", panel).checked, donate_note: $("[name=donate_note]", panel).value };
     if (ev) {
       await api(`/api/admin/events/${ev.id}`, { method: "PUT", body });
@@ -413,8 +413,10 @@ function eventForm(ev, allTags) {
     h("div.panel-block", h("span.field-label", "RSVPs"),
       sw("rsvp_enabled", "Take RSVPs", e.rsvp_enabled),
       field("Capacity", input("capacity", { type: "number", min: 1, value: e.capacity || "", placeholder: "No limit" }), { optional: true }),
-      field("Price per person", input("price", { inputmode: "decimal", value: toDollars(e.price), placeholder: "Free" }), { optional: true,
-        hintText: window.SITE?.venmo ? "Guests pay too. People pay with Venmo, and their spot is held for 24 hours." : "Add the club's Venmo handle under Settings > Give first." })),
+      field("Price per adult", input("price", { inputmode: "decimal", value: toDollars(e.price), placeholder: "Free" }), { optional: true,
+        hintText: window.SITE?.venmo ? "Adult guests pay too. People pay with Venmo, and their spot is held for 24 hours." : "Add the club's Venmo handle under Settings > Give first." }),
+      field("Price per kid", input("kid_price", { inputmode: "decimal", value: e.kid_price_set == null ? "" : String(e.kid_price_set / 100).replace(/\.0+$/, ""), placeholder: "Same as adults" }),
+        { optional: true, hintText: "Enter 0 to let kids in free." })),
     h("div.panel-block", h("span.field-label", "Donations", hint(window.SITE?.venmo
         ? "Shows a Venmo QR code on the event page. Payments open with the event name as the note."
         : "Add the club's Venmo handle under Settings > Give first.")),
@@ -631,19 +633,20 @@ function payCell(pay) {
 
 function rsvpTab(ev) {
   const going = ev.rsvps.filter((r) => r.status === "going");
-  const total = going.reduce((a, r) => a + 1 + r.guests, 0);
+  const total = going.reduce((a, r) => a + 1 + r.guests + (r.kids || 0), 0);
+  const kids = going.reduce((a, r) => a + (r.kids || 0), 0);
   const paid = ev.price || ev.rsvps.some((r) => r.pay);
   const wrap = h("div");
   const draw = () => clear(wrap).append(
-    h("div.a-head", h("div", h("h2.h3", `${total} going`), h("div.a-sub", `${plural(going.length, "RSVP")}, ${total - going.length} guests`)),
+    h("div.a-head", h("div", h("h2.h3", `${total} going`), h("div.a-sub", `${plural(going.length, "RSVP")}, ${plural(total - going.length - kids, "adult guest")}, ${plural(kids, "kid")}`)),
       h("div.row",
         can("email") ? aLink(`/email?event=${ev.id}`, { class: "btn small ghost" }, icon("mail", 16), "Email attendees") : null,
         h("button.btn.small.ghost", { type: "button", onclick: csv(`/api/admin/events/${ev.id}/export.csv`) }, icon("download", 16), "Roster CSV"))),
     ev.rsvps.length ? h("div.tbl-wrap", h("table.tbl",
-      h("thead", h("tr", h("th", "Name"), h("th", "Email"), h("th", "Status"), h("th.num", "Guests"), paid ? h("th", "Payment") : null, h("th", "When"), h("th"))),
+      h("thead", h("tr", h("th", "Name"), h("th", "Email"), h("th", "Status"), h("th.num", "Guests"), h("th.num", "Kids"), paid ? h("th", "Payment") : null, h("th", "When"), h("th"))),
       h("tbody", ev.rsvps.map((r) => h("tr",
         h("td.strong", r.name), h("td", h("a", { href: `mailto:${r.email}` }, r.email)), h("td", pill(r.status === "going" ? "yes" : r.status === "no" ? "closed" : "pending", r.status === "no" ? "Not going" : r.status[0].toUpperCase() + r.status.slice(1))),
-        h("td.num", r.guests || "–"), paid ? h("td", payCell(r.pay)) : null, h("td.sub", ago(r.created)),
+        h("td.num", r.guests || "–"), h("td.num", r.kids || "–"), paid ? h("td", payCell(r.pay)) : null, h("td.sub", ago(r.created)),
         h("td.actions", h("button.icon-btn", { type: "button", "aria-label": `Remove ${r.name}`, onclick: async () => {
           if (await confirmBox(`Remove ${r.name}'s RSVP?`, { ok: "Remove" })) { await api(`/api/admin/rsvps/${r.id}`, { method: "DELETE" }); ev.rsvps.splice(ev.rsvps.indexOf(r), 1); draw(); }
         } }, icon("close", 16))))))))
@@ -654,7 +657,7 @@ function rsvpTab(ev) {
 
 function headcount(people) {
   const going = people.filter((p) => p.rsvp?.status === "going");
-  const rsvp = going.reduce((a, p) => a + 1 + p.rsvp.guests, 0);
+  const rsvp = going.reduce((a, p) => a + 1 + p.rsvp.guests + p.rsvp.kids, 0);
   const extra = people.filter((p) => p.group === "signup").length;
   return { total: rsvp + extra, rsvp, extra, maybe: people.filter((p) => p.rsvp?.status === "maybe").length };
 }
@@ -671,6 +674,7 @@ function peopleTab(ev) {
     : h("span", pill(p.rsvp.status === "going" ? "yes" : p.rsvp.status === "no" ? "closed" : "pending",
       p.rsvp.status === "no" ? "Not going" : p.rsvp.status === "going" ? "Going" : "Maybe"),
       p.rsvp.guests ? h("span.sub", ` +${p.rsvp.guests}`) : null,
+      p.rsvp.kids ? h("span.sub", ` +${plural(p.rsvp.kids, "kid")}`) : null,
       p.rsvp.pay === "pending" ? h("span.unpaid", " Unpaid") : null);
   const signed = (p) => p.signups.length ? h("ul.plain", p.signups.map((u) =>
     h("li", u.item ? h("span", h("b", u.item), h("span.sub", ` · ${u.slot}`)) : u.slot, u.qty > 1 ? h("span.sub", ` ×${u.qty}`) : null,
@@ -691,7 +695,7 @@ function peopleTab(ev) {
   draw();
   return h("div",
     h("div.stats",
-      h("div.stat", h("b", n.total), h("span", "Expected ", hint("People who RSVP'd going plus their guests, and people who signed up without an RSVP. Maybes aren't counted."))),
+      h("div.stat", h("b", n.total), h("span", "Expected ", hint("People who RSVP'd going plus their guests and kids, and people who signed up without an RSVP. Maybes aren't counted."))),
       h("div.stat", h("b", n.rsvp), h("span", "From RSVPs")),
       h("div.stat", h("b", n.extra), h("span", "Signed up, no RSVP")),
       h("div.stat", h("b", n.maybe), h("span", "Maybe"))),
