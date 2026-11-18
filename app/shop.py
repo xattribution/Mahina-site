@@ -168,9 +168,10 @@ def reserve(c, items, active_only=True, online=False):
     if online:
         # Unpaid online orders may hold at most half of what's left of any item, so the rest stays available
         # at the table and for people who pay right away.
-        for row in c.execute("SELECT items FROM orders WHERE status='pending' AND channel='online'").fetchall():
+        for row in c.execute("SELECT items FROM orders WHERE status='pending' AND channel='online' AND COALESCE(kind, 'shop')='shop'").fetchall():
             for ln in _json(row["items"], []):
-                held[(ln["product_id"], ln["option"])] = held.get((ln["product_id"], ln["option"]), 0) + ln["qty"]
+                if ln.get("product_id"):
+                    held[(ln["product_id"], ln["option"])] = held.get((ln["product_id"], ln["option"]), 0) + ln["qty"]
         per_item = {}
         for (pid, _), q in want.items():
             per_item[pid] = per_item.get(pid, 0) + q
@@ -248,17 +249,18 @@ def order_out(o, admin=False):
     items = [{k: v for k, v in ln.items() if k != "data"} for ln in _json(o["items"], [])]
     out = {"code": o["code"], "status": o["status"], "total": o["total"], "items": items, "created": o["created"],
            "paid": o["status"] == "paid", "picked_up": bool(o["picked_up_at"]), "channel": o["channel"],
-           "kind": o.get("kind") or "shop"}
+           "kind": o.get("kind") or "shop", "claimed": bool(o.get("claimed_at"))}
     if is_event(o):
         out["event"] = event_of(o)
         out["sheet_id"] = next((ln.get("sheet_id") for ln in items if ln.get("sheet_id")), None)
-        if o["status"] == "pending":
+        if o["status"] == "pending" and not o.get("claimed_at"):
             out["held_until"] = held_until(o)
     if o["status"] == "pending" and venmo_handle():
         out["venmo"] = {"handle": venmo_handle(), "link": pay_link(o)}
     if admin:
         out.update(id=o["id"], name=o["name"], email=o["email"], method=o["method"], note=o["note"], paid_at=o["paid_at"],
-                   paid_by=o["paid_by"], picked_up_at=o["picked_up_at"], sent_to=_json(o.get("sent_to"), []))
+                   paid_by=o["paid_by"], picked_up_at=o["picked_up_at"], sent_to=_json(o.get("sent_to"), []),
+                   expired=bool(o.get("expired")), claimed_at=o.get("claimed_at"))
     elif not is_event(o):
         out["pickup"] = db.get_setting("shop_note") or ""
     return out
@@ -417,10 +419,15 @@ def alert_team(o, kind):
     """Email the people an admin picked whenever an online order comes in or gets paid."""
     ids = set(db.get_setting("shop_notify") or [])
     # A payment for a cancelled order always needs someone, so admins get that one too.
-    people = [p for p in shop_people() if p["id"] in ids or (kind in ("late", "refund") and p["role"] == "admin")]
+    # "I've paid" needs a person to check Venmo, so admins get it when nobody is picked for alerts.
+    people = [p for p in shop_people() if p["id"] in ids or (kind in ("late", "refund") and p["role"] == "admin")
+              or (kind == "claimed" and not ids and p["role"] == "admin")]
     if not people:
         return
-    if kind == "refund":
+    if kind == "claimed":
+        team_email(o, people, f"Check Venmo: {o['code']} says paid", f"{o['name'] or 'Someone'} says they paid {fmt(o['total'])} on Venmo. "
+                   f"Look for a payment with {o['code']} in the note, then tap Mark paid.")
+    elif kind == "refund":
         team_email(o, people, f"Refund check: {o['code']}", f"{o['name'] or 'Someone'} cancelled after paying {fmt(o['total'])}. "
                    "Refund it on Venmo if needed.")
     elif kind == "late":
@@ -445,7 +452,7 @@ def event_email(o, kind):
         when = datetime.fromisoformat(held_until(o)).strftime("%a %b %d, %I:%M %p").replace(" 0", " ")
         h, t = mailer.render(f"Pay to hold your spot", [f"Mahalo{', ' + first if first else ''}.", ("rows", rows),
                              f"Pay {fmt(o['total'])} with Venmo to @{venmo_handle()} and keep {o['code']} in the note. "
-                             f"We hold your spot until {when}."],
+                             f"We hold your spot until {when}. After you pay, tap I've paid on the payment page."],
                              button=("Pay with Venmo", pay_link(o)), footer_link=("View payment", url))
         mailer.queue(o["email"], f"Pay to hold your spot: {o['code']}", h, t, kind="order", sender=shop_sender())
     elif kind == "paid":
@@ -476,7 +483,8 @@ def order_email(o, kind):
     url = f"{mailer.site_url()}/shop/order/{o['code']}"
     if kind == "placed":
         h, t = mailer.render(f"Order {o['code']}", [f"Mahalo{', ' + first if first else ''}.", ("rows", rows),
-                                                    f"Pay {fmt(o['total'])} with Venmo to @{venmo_handle()} and keep {o['code']} in the note.",
+                                                    f"Pay {fmt(o['total'])} with Venmo to @{venmo_handle()} and keep {o['code']} in the note. "
+                                                    "After you pay, tap I've paid on your order page.",
                                                     *([pickup] if pickup else [])],
                              button=("Pay with Venmo", pay_link(o)), footer_link=("View your order", url))
         mailer.queue(o["email"], f"Your order {o['code']}", h, t, kind="order", sender=shop_sender())
@@ -550,6 +558,11 @@ def cancel(oid, note="", allow_paid=False, expired=False, reason=""):
 def change(o, action, user, method="", reason=""):
     """Team actions on an order: paid, picked_up, not_picked_up, cancel."""
     if action == "paid":
+        if o["status"] == "cancelled" and o.get("expired"):
+            # Paid after the hold ran out (and nobody tapped "I've paid"): bring it back if there's still room.
+            if not _revive(o):
+                raise Invalid("There's no room for it any more. Refund the payment on Venmo instead.")
+            o = db.one("SELECT * FROM orders WHERE id=?", (o["id"],))
         done = mark_paid(o, method if method in ("venmo", "cash") else "venmo", user["name"])
         if not done:
             raise Invalid("Only orders waiting for payment can be marked paid.")
@@ -579,7 +592,8 @@ def expire_stale(c=None, cutoff=None):
     now = db.now_local()
     for channel, hours in HOLD_HOURS.items():
         limit = (now - timedelta(hours=hours)).isoformat()
-        for o in db.q("SELECT * FROM orders WHERE status='pending' AND channel=? AND created < ?", (channel, limit)):
+        # Someone who tapped "I've paid" keeps their hold until the team confirms or cancels it.
+        for o in db.q("SELECT * FROM orders WHERE status='pending' AND channel=? AND created < ? AND claimed_at IS NULL", (channel, limit)):
             before, done = cancel(o["id"], f"Cancelled: not paid within {hours} hours.", expired=True)
             if done and channel == "online":
                 order_email(before, "expired")
@@ -975,6 +989,21 @@ def _by_code(code):
     if not o:
         raise Invalid("We couldn't find that order.", status=404)
     return o
+
+
+@public.post("/orders/{code}/sent")
+def order_sent(code: str, request: Request):
+    """The buyer says they've paid. Stops the hold from running out and asks the team to check Venmo."""
+    _throttle(request, "order-sent", 20)
+    o = _visible(_by_code(code))
+    if o["status"] == "pending" and not o.get("claimed_at"):
+        c = db.conn()
+        cur = c.execute("UPDATE orders SET claimed_at=? WHERE id=? AND status='pending' AND claimed_at IS NULL", (db.now_iso(), o["id"]))
+        c.commit()
+        if cur.rowcount == 1:
+            o = db.one("SELECT * FROM orders WHERE id=?", (o["id"],))
+            alert_team(o, "claimed")
+    return order_out(db.one("SELECT * FROM orders WHERE id=?", (o["id"],)))
 
 
 def _visible(o):

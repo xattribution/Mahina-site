@@ -118,14 +118,20 @@ export async function orderPage({ code }) {
   let timer = null;
   const stop = () => { clearInterval(timer); timer = null; };
   const draw = () => {
-    const [st, cls] = o.picked_up && !evt ? ["Picked up", "paid"] : STATUS[o.status] || [o.status, ""];
+    const [st, cls] = o.picked_up && !evt ? ["Picked up", "paid"] : o.status === "pending" && o.claimed ? ["Checking payment", "pending"] : STATUS[o.status] || [o.status, ""];
+    const sent = async (e) => {
+      e.currentTarget.disabled = true;
+      try { o = await api(`/api/shop/orders/${encodeURIComponent(o.code)}/sent`, { method: "POST" }); draw(); toast("Mahalo! We'll confirm it shortly."); }
+      catch { e.currentTarget.disabled = false; }
+    };
     const qr = CFG.demo ? (window.MAHINA_DEMO.qr?.() || "") : `/api/shop/orders/${o.code}/qr.svg`;
     clear(box).append(
       h("div.order-head", h("h1.h1", o.code), h("span.order-status", { class: cls }, o.status === "paid" ? icon("check", 18) : null, st)),
       o.status === "pending" && o.venmo ? h("section.order-pay.venmo",
         h("div.order-amount", h("span", "Pay"), h("b.num", money(o.total))),
         h("div.qr.order-qr", h("img", { src: qr, alt: `Venmo QR code to pay ${money(o.total)} for order ${o.code}`, width: 188, height: 188 })),
-        h("div.order-actions", h("a.btn", { href: o.venmo.link, target: "_blank", rel: "noopener" }, "Pay with Venmo")),
+        h("div.order-actions", h("a.btn", { href: o.venmo.link, target: "_blank", rel: "noopener" }, "Pay with Venmo"),
+          o.claimed ? null : h("button.btn.ghost", { type: "button", onclick: sent }, icon("check", 18), "I've paid")),
         h("dl.order-facts",
           h("dt", "To"), h("dd", "@" + o.venmo.handle),
           h("dt", "Note", hint("Keep this note on the payment. It's how we match your payment to your order.")),

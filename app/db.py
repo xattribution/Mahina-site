@@ -263,6 +263,9 @@ ADDED_COLUMNS = [
     ("orders", "kind", "TEXT DEFAULT 'shop'"),
     ("rsvps", "order_id", "INTEGER"),
     ("signups", "order_id", "INTEGER"),
+    # The buyer tapped "I've paid": the hold stops expiring and the team checks Venmo and marks it paid.
+    # This is what makes payments work without the Gmail matching.
+    ("orders", "claimed_at", "TEXT"),
 ]
 
 

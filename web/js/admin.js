@@ -624,7 +624,8 @@ async function sheetEditorPage(id) {
 // Payment state for a paid RSVP or sign-up. People with Shop access can open the order to mark it paid.
 function payCell(pay) {
   if (!pay) return h("span.muted", "–");
-  const label = pay.status === "paid" ? pill("yes", "Paid") : pay.status === "pending" ? pill("pending", "Unpaid") : pill("closed", "Cancelled");
+  const label = pay.status === "paid" ? pill("yes", "Paid") : pay.status === "pending" ? (pay.claimed ? pill("open", "Says paid") : pill("pending", "Unpaid"))
+    : pill("closed", "Cancelled");
   return can("shop") ? aLink(`/shop?tab=orders&order=${pay.code}`, { class: "pay-link", title: `Order ${pay.code}` }, label) : label;
 }
 

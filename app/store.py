@@ -249,8 +249,8 @@ def order_states(ids):
     ids = [i for i in ids if i]
     if not ids:
         return {}
-    return {o["id"]: {"code": o["code"], "status": o["status"]}
-            for o in db.q(f"SELECT id, code, status FROM orders WHERE id IN ({','.join('?' * len(ids))})", tuple(ids))}
+    return {o["id"]: {"code": o["code"], "status": o["status"], "claimed": bool(o["claimed_at"])}
+            for o in db.q(f"SELECT id, code, status, claimed_at FROM orders WHERE id IN ({','.join('?' * len(ids))})", tuple(ids))}
 
 
 def _locked():

@@ -140,8 +140,8 @@ function venmoSale(o, after) {
 const VIEWS = [["open", "To do"], ["waiting", "Waiting for payment"], ["hand_out", "To hand out"], ["all", "All"]];
 
 function statusPill(o) {
-  if (o.status === "cancelled") return pill("cancelled", "Cancelled");
-  if (o.status === "pending") return pill("pending", "Waiting");
+  if (o.status === "cancelled") return pill("cancelled", o.expired ? "Released" : "Cancelled");
+  if (o.status === "pending") return o.claimed_at ? pill("open", "Says paid") : pill("pending", "Waiting");
   if (o.kind === "event") return pill("published", "Paid");
   return o.picked_up ? pill("published", o.channel === "table" ? "Sold" : "Picked up") : pill("open", "Paid");
 }
@@ -191,7 +191,7 @@ async function ordersTab(data, reload, setTab, focus) {
   };
   const actions = (o) => {
     const b = [];
-    if (o.status === "pending") b.push(h("button.btn.small", { type: "button", onclick: () => payDialog(o) }, "Mark paid"));
+    if (o.status === "pending" || (o.status === "cancelled" && o.expired)) b.push(h("button.btn.small", { type: "button", onclick: () => payDialog(o) }, "Mark paid"));
     if (o.status === "paid" && !o.picked_up) b.push(h("button.btn.small.dark", { type: "button", onclick: () => act(o, "picked_up") }, "Handed out"));
     if (o.status === "paid" && o.picked_up && o.channel === "online" && o.kind !== "event") b.push(h("button.btn.small.ghost", { type: "button", onclick: () => act(o, "not_picked_up") }, "Undo"));
     b.push(h("button.icon-btn", { type: "button", "aria-label": `Send ${o.code} to someone`, title: "Send to someone", onclick: () => sendDialog(o, data.people || [], draw) }, icon("send", 16)));
