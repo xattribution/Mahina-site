@@ -507,13 +507,15 @@ function rsvpPanel(ev) {
     const priceText = !ev.price && !kidPrice ? "" : kidPrice === ev.price ? `${price(ev.price)} per person`
       : `${ev.price ? `${price(ev.price)} per adult` : "Adults free"}, ${kidPrice ? `${price(kidPrice)} per kid` : "kids free"}`;
     const open = () => {
-      const n = { guests: 0, kids: 0 };
+      // Adults counts the person RSVPing, so it starts at 1 and can't go below it. The server takes guests = adults - 1.
+      const n = { adults: 1, kids: 0 };
+      const min = { adults: 1, kids: 0 }, max = { adults: 21, kids: 20 };
       const total = h("b.num");
-      const sum = () => ev.price * (1 + n.guests) + kidPrice * n.kids;
+      const sum = () => ev.price * n.adults + kidPrice * n.kids;
       const counter = (key, label, help) => {
-        const out = h("output", "0");
+        const out = h("output", String(n[key]));
         const step = (d) => {
-          n[key] = Math.max(0, Math.min(20, n[key] + d)); out.value = n[key]; total.textContent = money(sum());
+          n[key] = Math.max(min[key], Math.min(max[key], n[key] + d)); out.value = n[key]; total.textContent = money(sum());
           const btn = $("dialog[open] button[type=submit]");
           if (btn && priceText) btn.textContent = sum() ? "Continue to payment" : "I'm going";
         };
@@ -527,9 +529,9 @@ function rsvpPanel(ev) {
       total.textContent = money(sum());
       signupPopup({
         title: ev.title, sub: `${longDate(parse(ev.starts_at))}, ${timeRange(ev)}`, submit: sum() ? "Continue to payment" : "I'm going",
-        fields: [counter("guests", "Adult guests", "Family or friends coming with you."), counter("kids", "Kids"),
+        fields: [counter("adults", "Adults", "Including you."), counter("kids", "Kids"),
           priceText ? h("div.row.pay-total", h("span", priceText), total) : null],
-        onSubmit: (v) => api(`/api/events/${ev.slug}/rsvp`, { method: "POST", body: { ...v, ...n, status: "going" } }),
+        onSubmit: (v) => api(`/api/events/${ev.slug}/rsvp`, { method: "POST", body: { ...v, guests: n.adults - 1, kids: n.kids, status: "going" } }),
         done: (res) => { if (res.pay) return go(`/shop/order/${res.pay}`); ev.going = res.going; draw(res); },
       });
     };
